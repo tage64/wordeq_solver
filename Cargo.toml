@@ -1,0 +1,12 @@
+[package]
+name = "smt_str_par"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bit-set = "0.8.0"
+nonmax = "0.5.5"
+
+[dev-dependencies]
+rand = { version = "0.8.5", default-features = false }
+rand_xoshiro = "0.6.0"
