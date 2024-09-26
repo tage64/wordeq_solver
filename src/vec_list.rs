@@ -81,6 +81,13 @@ impl<T> VecList<T> {
         &self.get_occupied(ptr).item
     }
 
+    /// Get a mutable reference to the element pointed to by a pointer. (O(1))
+    ///
+    /// It is your responsibility that the pointer is valid.
+    pub fn get_mut(&mut self, ptr: ListPtr) -> &mut T {
+        &mut self.get_occupied_mut(ptr).item
+    }
+
     /// Get a pointer to the head of the list. (O(1))
     pub fn head(&self) -> Option<ListPtr> {
         self.head
