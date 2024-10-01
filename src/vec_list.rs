@@ -61,6 +61,16 @@ impl<T> VecList<T> {
     }
   }
 
+  /// Check if the list contains an element at a certain ptr. Note that you might suffer from the
+  /// ABA problem, that is if you delete an item and add a new item, the pointer to the deleted
+  /// item might point to the new item.
+  pub fn contains_ptr(&self, ptr: ListPtr) -> bool {
+    match &self.entries[ptr.to_usize()] {
+      Entry::Occupied(_) => true,
+      Entry::Vacant { .. } => false,
+    }
+  }
+
   fn get_occupied(&self, ptr: ListPtr) -> &OccupiedEntry<T> {
     let Entry::Occupied(x) = &self.entries[ptr.to_usize()] else {
       panic!("Entry unreachable: {:?}", ptr)
@@ -230,7 +240,7 @@ impl<T> VecList<T> {
   }
 
   /// Iterate over all elements in the list.
-  pub fn iter(&self) -> impl DoubleEndedIterator<Item = (ListPtr, &T)> {
+  pub fn iter(&self) -> impl DoubleEndedIterator<Item = (ListPtr, &T)> + Copy {
     Iter {
       list: self,
       start: self.head,
@@ -239,6 +249,7 @@ impl<T> VecList<T> {
   }
 }
 
+#[derive(Debug)]
 struct Iter<'a, T> {
   list: &'a VecList<T>,
   start: Option<ListPtr>,
@@ -276,6 +287,18 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
   }
 }
 
+impl<'a, T> Clone for Iter<'a, T> {
+  fn clone(&self) -> Self {
+    Self {
+      list: self.list,
+      start: self.start,
+      end: self.end,
+    }
+  }
+}
+
+impl<'a, T> Copy for Iter<'a, T> {}
+
 #[cfg(test)]
 mod tests {
   use rand::prelude::*;
@@ -299,6 +322,7 @@ mod tests {
         let (ptr, item) = ptr_list.remove(idx);
         let item2 = list.remove(ptr);
         assert_eq!(item, item2);
+        assert!(!list.contains_ptr(ptr));
       } else {
         // Insert an element.
         let val = rng.gen();
@@ -336,6 +360,7 @@ mod tests {
     loop {
       if let Some((ptr, val)) = ptr_iter.next() {
         assert_eq!(maybe_ptr, Some(ptr));
+        assert!(list.contains_ptr(ptr));
         assert_eq!(val, *list.get(ptr),);
         assert_eq!(list_iter.next().unwrap(), (ptr, &val));
         maybe_ptr = list.next(ptr);

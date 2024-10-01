@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+arrayvec = "0.7.6"
 bit-set = "0.8.0"
 nonmax = "0.5.5"
 vec_map = "0.8.2"
