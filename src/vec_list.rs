@@ -299,6 +299,16 @@ impl<'a, T> Clone for Iter<'a, T> {
 
 impl<'a, T> Copy for Iter<'a, T> {}
 
+impl<T> FromIterator<T> for VecList<T> {
+  fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+    let mut list = VecList::new();
+    for x in iter {
+      list.insert_back(x);
+    }
+    list
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use rand::prelude::*;
@@ -404,5 +414,20 @@ mod tests {
       maybe_vacant = next_vacant;
     }
     assert_eq!(maybe_vacant, None);
+  }
+
+  #[test]
+  fn test_from_iter() {
+    let lists = [vec![], vec![1], vec![1, 2], vec![1, 2, 3, 4]];
+    for list in lists {
+      assert!(
+        list
+          .iter()
+          .collect::<VecList<_>>()
+          .iter()
+          .map(|(_, x)| *x)
+          .eq(list.iter())
+      );
+    }
   }
 }

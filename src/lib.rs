@@ -44,7 +44,7 @@ pub struct Clause {
 pub struct Cnf(pub VecList<Clause>);
 
 /// Marker type for unsat.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unsat;
 
 /// A result returned from the simplify_clause function.
@@ -324,6 +324,7 @@ impl Solver {
     while !self.updated_clauses.is_empty() {
       let mut unit_propagations = Vec::new();
       while let Some(clause_ptr) = self.updated_clauses.iter().next().map(ListPtr::from_usize) {
+        self.updated_clauses.remove(clause_ptr.to_usize());
         match self.simplify_equation(clause_ptr)? {
           SimplificationResult::UnitProp(x) => unit_propagations.push((clause_ptr, x)),
           SimplificationResult::Split(s) => {
@@ -641,5 +642,38 @@ impl Solver {
     let new_var = Variable { id: self.no_vars };
     self.no_vars += 1;
     new_var
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_solver() {
+    let formula_1 = Cnf(VecList::new());
+    assert_eq!(Solver::new(formula_1, 0).solve(), Ok(()));
+    let formula_2 = Cnf(
+      [Clause {
+        equation: Equation {
+          lhs: Word(VecList::new()),
+          rhs: Word(VecList::new()),
+        },
+      }]
+      .into_iter()
+      .collect(),
+    );
+    assert_eq!(Solver::new(formula_2, 0).solve(), Ok(()));
+    let formula_3 = Cnf(
+      [Clause {
+        equation: Equation {
+          lhs: Word([Term::Terminal(Terminal('a'))].into_iter().collect()),
+          rhs: Word(VecList::new()),
+        },
+      }]
+      .into_iter()
+      .collect(),
+    );
+    assert_eq!(Solver::new(formula_3, 0).solve(), Err(Unsat));
   }
 }
