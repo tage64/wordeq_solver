@@ -69,6 +69,8 @@ enum UnitProp {
   UnitPropEmptyLhs,
   /// RHS is empty.
   UnitPropEmptyRhs,
+  /// Both LHS and RHS are empty.
+  BothSidesEmpty,
 }
 use UnitProp::*;
 
@@ -311,7 +313,9 @@ impl Solver {
             FreshVar => replacement_fixed.push(Term::Variable(self.add_fresh_var())),
           }
         }
+        self.assert_invariants();
         self.fix_var(var, replacement_fixed);
+        self.assert_invariants();
         break Ok(());
       }
       // There are no more branches so let's backtrack to the grand parent.
@@ -340,6 +344,7 @@ impl Solver {
           equation: Equation { lhs, rhs },
         } = self.formula.0.get(clause_ptr);
         match unit_prop {
+          BothSidesEmpty => (),
           UnitPropEmptyLhs => {
             let mut to_be_empty = BitSet::new(); // All variables in RHS.
             for (_, term) in rhs.0.iter() {
@@ -441,129 +446,157 @@ impl Solver {
     let Clause {
       equation: Equation { lhs, rhs },
     } = self.formula.0.get_mut(clause_ptr);
-    Ok(loop {
-      let lhs_head_ptr = lhs.0.head();
-      let rhs_head_ptr = rhs.0.head();
+    // Remove equal terminals from the end.
+    loop {
       let lhs_back_ptr = lhs.0.back();
       let rhs_back_ptr = rhs.0.back();
-      let lhs_head = lhs_head_ptr.map(|x| *lhs.0.get(x));
-      let rhs_head = rhs_head_ptr.map(|x| *rhs.0.get(x));
       let lhs_back = lhs_back_ptr.map(|x| *lhs.0.get(x));
       let rhs_back = rhs_back_ptr.map(|x| *rhs.0.get(x));
-      match (lhs_head, rhs_head, lhs_back, rhs_back) {
-        (None, Some(Term::Variable(_)) | None, _, Some(Term::Variable(_)) | None) => {
-          // LHS is empty and RHS is empty or starts and ends with variables.
-          break UnitProp(UnitPropEmptyLhs);
+      match (lhs_back, rhs_back) {
+        (None, None) => return Ok(UnitProp(BothSidesEmpty)),
+        (None, Some(Term::Variable(_))) => {
+          if let Term::Terminal(_) = rhs.0.get(rhs.0.head().unwrap()) {
+            return Err(Unsat);
+          } else {
+            // LHS is empty and RHS is empty or starts and ends with variables.
+            return Ok(UnitProp(UnitPropEmptyLhs));
+          }
         }
-        (Some(Term::Variable(_)), None, Some(Term::Variable(_)), _) => {
-          // RHS is empty and LHS starts and ends with variables.
-          break UnitProp(UnitPropEmptyRhs);
+        (Some(Term::Variable(_)), None) => {
+          if let Term::Terminal(_) = lhs.0.get(lhs.0.head().unwrap()) {
+            return Err(Unsat);
+          } else {
+            // RHS is empty and LHS starts and ends with variables.
+            return Ok(UnitProp(UnitPropEmptyRhs));
+          }
         }
-        (None, Some(_), _, _) | (Some(_), None, _, _) => return Err(Unsat),
-        (Some(lhs_head), Some(rhs_head), Some(lhs_back), Some(rhs_back)) => {
-          match (lhs_back, rhs_back) {
-            (x, y) if x == y => {
-              // Both sides ends with the same terminal or variable.
-              lhs.0.remove(lhs_back_ptr.unwrap());
-              rhs.0.remove(rhs_back_ptr.unwrap());
-              // Check if we should remove from self.var_ptrs.
-              if let Term::Variable(x) = x {
-                // We removed the variable x at both LHS and RHS.
-                let vec_map::Entry::Occupied(mut entry) =
-                  self.var_ptrs[x.id].entry(clause_ptr.to_usize())
-                else {
-                  unreachable!()
-                };
-                entry.get_mut().0.remove(lhs_back_ptr.unwrap().to_usize());
-                entry.get_mut().1.remove(rhs_back_ptr.unwrap().to_usize());
-                if entry.get().0.is_empty() && entry.get().1.is_empty() {
-                  entry.remove();
-                }
-                if self.var_ptrs[x.id].is_empty() {
-                  self.var_ptrs.remove(x.id);
-                }
-              }
+        (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(Unsat),
+        (Some(x), Some(y)) if x == y => {
+          // Both sides ends with the same terminal or variable.
+          lhs.0.remove(lhs_back_ptr.unwrap());
+          rhs.0.remove(rhs_back_ptr.unwrap());
+          // Check if we should remove from self.var_ptrs.
+          if let Term::Variable(x) = x {
+            // We removed the variable x at both LHS and RHS.
+            let vec_map::Entry::Occupied(mut entry) =
+              self.var_ptrs[x.id].entry(clause_ptr.to_usize())
+            else {
+              unreachable!()
+            };
+            entry.get_mut().0.remove(lhs_back_ptr.unwrap().to_usize());
+            entry.get_mut().1.remove(rhs_back_ptr.unwrap().to_usize());
+            if entry.get().0.is_empty() && entry.get().1.is_empty() {
+              entry.remove();
             }
-            // Rule 6: Both sides end with distinct terminals:
-            (Term::Terminal(_), Term::Terminal(_)) => {
-              return Err(Unsat);
-            }
-            (Term::Terminal(_), Term::Variable(x)) => {
-              if rhs_head_ptr == rhs_back_ptr {
-                // RHS is a single variable.
-                break UnitProp(UnitPropRhs(x));
-              }
-            }
-            (Term::Variable(x), Term::Terminal(_)) => {
-              if lhs_head_ptr == lhs_back_ptr {
-                // LHS is a single variable.
-                break UnitProp(UnitPropLhs(x));
-              }
-            }
-            (Term::Variable(x), Term::Variable(y)) => {
-              if lhs_head_ptr == lhs_back_ptr {
-                // LHS is a single variable.
-                break UnitProp(UnitPropLhs(x));
-              } else if rhs_head_ptr == rhs_back_ptr {
-                // RHS is a single variable.
-                break UnitProp(UnitPropRhs(y));
-              }
+            if self.var_ptrs[x.id].is_empty() {
+              self.var_ptrs.remove(x.id);
             }
           }
-          let branches = match (lhs_head, rhs_head) {
-            (x, y) if x == y => {
-              // Both sides starts with the same terminal or variable.
-              lhs.0.remove(lhs_head_ptr.unwrap());
-              rhs.0.remove(rhs_head_ptr.unwrap());
-              // Check if we should remove from self.var_ptrs.
-              if let Term::Variable(x) = x {
-                // We removed the variable x at both LHS and RHS.
-                let vec_map::Entry::Occupied(mut entry) =
-                  self.var_ptrs[x.id].entry(clause_ptr.to_usize())
-                else {
-                  unreachable!()
-                };
-                entry.get_mut().0.remove(lhs_head_ptr.unwrap().to_usize());
-                entry.get_mut().1.remove(rhs_head_ptr.unwrap().to_usize());
-                if entry.get().0.is_empty() && entry.get().1.is_empty() {
-                  entry.remove();
-                }
-                if self.var_ptrs[x.id].is_empty() {
-                  self.var_ptrs.remove(x.id);
-                }
-              }
-              continue;
+        }
+        // Rule 6: Both sides end with distinct terminals:
+        (Some(Term::Terminal(_)), Some(Term::Terminal(_))) => {
+          return Err(Unsat);
+        }
+        (Some(Term::Variable(_)), Some(_)) | (Some(_), Some(Term::Variable(_))) => break,
+      }
+    }
+    // Remove equal terminals from the start and perform split.
+    loop {
+      let lhs_head_ptr = lhs.0.head();
+      let rhs_head_ptr = rhs.0.head();
+      let lhs_head = lhs_head_ptr.map(|x| *lhs.0.get(x));
+      let rhs_head = rhs_head_ptr.map(|x| *rhs.0.get(x));
+      match (lhs_head, rhs_head) {
+        (None, None) => return Ok(UnitProp(BothSidesEmpty)),
+        (None, Some(Term::Variable(_))) => {
+          if let Term::Terminal(_) = rhs.0.get(rhs.0.head().unwrap()) {
+            return Err(Unsat);
+          } else {
+            // LHS is empty and RHS is empty or starts and ends with variables.
+            return Ok(UnitProp(UnitPropEmptyLhs));
+          }
+        }
+        (Some(Term::Variable(_)), None) => {
+          if let Term::Terminal(_) = lhs.0.get(lhs.0.head().unwrap()) {
+            return Err(Unsat);
+          } else {
+            // RHS is empty and LHS starts and ends with variables.
+            return Ok(UnitProp(UnitPropEmptyRhs));
+          }
+        }
+        (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(Unsat),
+        (Some(x), Some(y)) if x == y => {
+          // Both sides starts with the same terminal or variable.
+          lhs.0.remove(lhs_head_ptr.unwrap());
+          rhs.0.remove(rhs_head_ptr.unwrap());
+          // Check if we should remove from self.var_ptrs.
+          if let Term::Variable(x) = x {
+            // We removed the variable x at both LHS and RHS.
+            let vec_map::Entry::Occupied(mut entry) =
+              self.var_ptrs[x.id].entry(clause_ptr.to_usize())
+            else {
+              unreachable!()
+            };
+            entry.get_mut().0.remove(lhs_head_ptr.unwrap().to_usize());
+            entry.get_mut().1.remove(rhs_head_ptr.unwrap().to_usize());
+            if entry.get().0.is_empty() && entry.get().1.is_empty() {
+              entry.remove();
             }
-            // Rule 6: Both sides start with distinct terminals:
-            (Term::Terminal(_), Term::Terminal(_)) => {
-              return Err(Unsat);
+            if self.var_ptrs[x.id].is_empty() {
+              self.var_ptrs.remove(x.id);
             }
-            // Rule 7: One side starts with a terminal and the other starts with a variable.
-            (Term::Terminal(a), Term::Variable(x)) | (Term::Variable(x), Term::Terminal(a)) => {
-              Branches(
-                [(x, ArrayVec::new()), (x, [a.into(), FreshVar].into())]
-                  .into_iter()
-                  .collect(),
-              )
-            }
-            // Rule 8: Both sides starts with variables.
-            (Term::Variable(x), Term::Variable(y)) => Branches(
+          }
+        }
+        // Rule 6: Both sides start with distinct terminals:
+        (Some(Term::Terminal(_)), Some(Term::Terminal(_))) => {
+          return Err(Unsat);
+        }
+        // Rule 7: One side starts with a terminal and the other starts with a variable.
+        (Some(Term::Terminal(a)), Some(Term::Variable(x))) => {
+          if rhs_head_ptr == rhs.0.back() {
+            // RHS is a single variable.
+            return Ok(UnitProp(UnitPropRhs(x)));
+          } else {
+            return Ok(Split(Branches(
+              [(x, ArrayVec::new()), (x, [a.into(), FreshVar].into())]
+                .into_iter()
+                .collect(),
+            )));
+          }
+        }
+        (Some(Term::Variable(x)), Some(Term::Terminal(a))) => {
+          if lhs_head_ptr == lhs.0.back() {
+            // LHS is a single variable.
+            return Ok(UnitProp(UnitPropLhs(x)));
+          } else {
+            return Ok(Split(Branches(
+              [(x, ArrayVec::new()), (x, [a.into(), FreshVar].into())]
+                .into_iter()
+                .collect(),
+            )));
+          }
+        }
+        // Rule 8: Both sides starts with variables.
+        (Some(Term::Variable(x)), Some(Term::Variable(y))) => {
+          if lhs_head_ptr == lhs.0.back() {
+            // LHS is a single variable.
+            return Ok(UnitProp(UnitPropLhs(x)));
+          } else if rhs_head_ptr == rhs.0.back() {
+            // RHS is a single variable.
+            return Ok(UnitProp(UnitPropRhs(y)));
+          } else {
+            return Ok(Split(Branches(
               [
                 (x, [y.into()].into_iter().collect()),
                 (x, [y.into(), FreshVar].into()),
                 (y, [x.into(), FreshVar].into()),
               ]
               .into(),
-            ),
-          };
-          break Split(branches);
+            )));
+          }
         }
-        (None, _, Some(_), _)
-        | (Some(_), _, None, _)
-        | (_, None, _, Some(_))
-        | (_, Some(_), _, None) => unreachable!(),
-      }
-    })
+      };
+    }
   }
 
   /// Remove a clause.
@@ -595,7 +628,7 @@ impl Solver {
 
   /// Given a variable and a value, replace all occurences of that variable with the value.
   fn fix_var(&mut self, var: Variable, val: impl IntoIterator<Item = Term> + Clone) {
-    // Debug assert:
+    // TODO: Debug assert:
     assert!(
       val
         .clone()
@@ -628,7 +661,17 @@ impl Solver {
       }
       for term_ptr in rhs_ptrs.iter().map(ListPtr::from_usize) {
         for insert_term in val.clone() {
-          rhs.0.insert_before(term_ptr, insert_term);
+          let insert_ptr = rhs.0.insert_before(term_ptr, insert_term);
+          if let Term::Variable(var) = insert_term {
+            self
+              .var_ptrs
+              .entry(var.id)
+              .or_insert_with(VecMap::new)
+              .entry(clause_id)
+              .or_insert((BitSet::new(), BitSet::new()))
+              .1
+              .insert(insert_ptr.to_usize());
+          }
         }
         rhs.0.remove(term_ptr);
       }
@@ -647,6 +690,8 @@ impl Solver {
 
 #[cfg(test)]
 mod tests {
+  use rand::prelude::*;
+
   use super::*;
 
   #[test]
@@ -675,5 +720,95 @@ mod tests {
       .collect(),
     );
     assert_eq!(Solver::new(formula_3, 0).solve(), Err(Unsat));
+  }
+
+  #[test]
+  fn random_sat_tests() {
+    let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42);
+    let var_names: [&str; 8] = ["X", "Y", "Z", "U", "V", "W", "P", "Q"];
+    let var_index = |var_name: char| {
+      var_names
+        .iter()
+        .position(|x| x.chars().next().unwrap() == var_name)
+        .unwrap()
+    };
+    for test_i in 0..1024 {
+      if test_i % 16 == 0 {
+        println!("Test iteration: {test_i}");
+      }
+      let n_clauses = rng.gen_range(0..=3);
+      let mut lhss = Vec::<String>::with_capacity(n_clauses);
+      let mut rhss = Vec::<String>::with_capacity(n_clauses);
+      for i in 0..n_clauses {
+        let str_len = rng.gen_range(0..=8);
+        let string = (0..str_len)
+          .map(|_| if rng.gen() { 'a' } else { 'b' })
+          .collect::<String>();
+        lhss.push(string.clone());
+        rhss.push(string);
+      }
+      let n_variables = rng.gen_range(0..8);
+      let mut vars = Vec::with_capacity(n_variables);
+      for i in 0..n_variables {
+        let len = rng.gen_range(0..4);
+        let val = (0..len)
+          .map(|_| if rng.gen() { 'a' } else { 'b' })
+          .collect::<String>();
+        vars.push((var_names[i], val));
+      }
+      // Replace substrings equal to any variable with a probability of 3/4.
+      for (var_name, val) in vars {
+        for xhs in lhss.iter_mut().chain(rhss.iter_mut()) {
+          while rng.gen_bool(0.75) {
+            let Some(i) = xhs.find(&val) else {
+              break;
+            };
+            xhs.replace_range(i..(i + val.len()), var_name);
+          }
+        }
+      }
+      // Create the CNF.
+      let cnf = Cnf(
+        lhss
+          .iter()
+          .zip(rhss.iter())
+          .map(|(lhs_str, rhs_str)| {
+            let lhs = Word(
+              lhs_str
+                .chars()
+                .map(|c| {
+                  if c == 'a' || c == 'b' {
+                    Term::Terminal(Terminal(c))
+                  } else {
+                    Term::Variable(Variable { id: var_index(c) })
+                  }
+                })
+                .collect(),
+            );
+            let rhs = Word(
+              rhs_str
+                .chars()
+                .map(|c| {
+                  if c == 'a' || c == 'b' {
+                    Term::Terminal(Terminal(c))
+                  } else {
+                    Term::Variable(Variable { id: var_index(c) })
+                  }
+                })
+                .collect(),
+            );
+            Clause {
+              equation: Equation { lhs, rhs },
+            }
+          })
+          .collect(),
+      );
+      println!("Solving:");
+      for (lhs, rhs) in lhss.iter().zip(rhss.iter()) {
+        println!("  {lhs} = {rhs}");
+      }
+      let mut solver = Solver::new(cnf, n_variables);
+      assert!(solver.solve().is_ok());
+    }
   }
 }
