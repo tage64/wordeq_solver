@@ -1,15 +1,18 @@
 mod vec_list;
+use std::collections::BTreeSet;
+use std::fmt;
+
 use arrayvec::ArrayVec;
 use bit_set::BitSet;
 use vec_list::{ListPtr, VecList};
 use vec_map::VecMap;
 
 /// A terminal (a character).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Terminal(pub char);
 
 /// A variable with a unique id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Variable {
   pub id: usize,
 }
@@ -77,26 +80,29 @@ use UnitProp::*;
 /// Split on a variable. There will be at most three branches on one variable and the variable
 /// will be replaced with 0-2 term or fresh variables.
 #[derive(Debug, Clone)]
-struct Branches(ArrayVec<(Variable, ArrayVec<TermOrFreshVar, 2>), 3>);
+struct Branches(ArrayVec<(Variable, BranchVal), 3>);
 
-/// A Term or a fresh variable.
-#[derive(Debug, Clone, Copy)]
-enum TermOrFreshVar {
-  Term(Term),
-  /// Create a new fresh variable.
-  FreshVar,
-}
-use TermOrFreshVar::FreshVar;
-
-impl From<Variable> for TermOrFreshVar {
-  fn from(x: Variable) -> Self {
-    TermOrFreshVar::Term(Term::Variable(x))
-  }
+/// A value for a variable in a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BranchVal {
+  /// The empty string.
+  Empty,
+  /// A terminal followed by a fresh variable.
+  TerminalAndFresh(Terminal),
+  /// Two variables equal to one another.
+  EqualVar(Variable),
+  /// One variable equal to another and a fresh variable.
+  VarAndFresh(Variable),
 }
 
-impl From<Terminal> for TermOrFreshVar {
-  fn from(a: Terminal) -> Self {
-    TermOrFreshVar::Term(Term::Terminal(a))
+impl BranchVal {
+  fn terms(self, mk_fresh: impl FnOnce() -> Variable) -> ArrayVec<Term, 2> {
+    match self {
+      Self::Empty => ArrayVec::new(),
+      Self::TerminalAndFresh(t) => [Term::Terminal(t), Term::Variable(mk_fresh())].into(),
+      Self::EqualVar(v) => [Term::Variable(v)].into_iter().collect(),
+      Self::VarAndFresh(v) => [Term::Variable(v), Term::Variable(mk_fresh())].into(),
+    }
   }
 }
 
@@ -109,6 +115,8 @@ pub struct Solver {
   no_vars: usize,
   /// assignments[x] = the value for variable with id x.
   pub assignments: VecMap<Vec<Term>>,
+  /// var_names[x] = the name for variable with id x.
+  var_names: Vec<String>,
   /// var_ptrs is a map with variable ids as keys, the values are maps of all clauses where that
   /// variable exists, they have clause pointers as keys and pairs (lhs_ptrs, rhs_ptrs) as
   /// values, where lhs_ptrs and rhs_ptrs are bitsets of pointers to
@@ -116,17 +124,16 @@ pub struct Solver {
   var_ptrs: VecMap<VecMap<(BitSet, BitSet)>>,
   /// A set of pointers to all clauses which might have changed and should be checked.
   updated_clauses: BitSet,
-  /// splits[c] = a possible split at clause c.
-  ///
-  /// splits and updated_clauses should be disjunct, the remaining clauses are true.
-  splits: VecMap<Branches>,
+  /// splits[x] = all splits for variable v. Disjunct with self.assignments.
+  splits: VecMap<BTreeSet<BranchVal>>,
   /// The parent of this node in the search tree together with the other branches to try under that
   /// parent.
-  parent: Option<(Box<Self>, Branches)>,
+  parent: Option<(Box<Self>, (Variable, BTreeSet<BranchVal>))>,
 }
 
 impl Solver {
-  pub fn new(formula: Cnf, no_vars: usize) -> Self {
+  pub fn new(formula: Cnf, no_vars: usize, var_names: Vec<String>) -> Self {
+    assert_eq!(no_vars, var_names.len());
     let mut var_ptrs = VecMap::with_capacity(no_vars);
     for (clause_ptr, clause) in formula.0.iter() {
       for (term_ptr, term) in clause.equation.lhs.0.iter() {
@@ -156,6 +163,7 @@ impl Solver {
     Self {
       formula,
       no_vars,
+      var_names,
       assignments: VecMap::new(),
       var_ptrs,
       updated_clauses,
@@ -164,14 +172,77 @@ impl Solver {
     }
   }
 
+  #[allow(dead_code)]
+  fn display_word<'a>(
+    &'a self,
+    word: impl Iterator<Item = &'a Term> + Clone + 'a,
+  ) -> impl fmt::Display + 'a {
+    struct Displayer<'a, I>(I, &'a Solver);
+    impl<'a, I> fmt::Display for Displayer<'a, I>
+    where
+      I: Iterator<Item = &'a Term> + Clone + 'a,
+    {
+      fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for x in self.0.clone() {
+          match x {
+            Term::Terminal(Terminal(t)) => write!(f, "{t}")?,
+            Term::Variable(v) => write!(f, "{}", &self.1.var_names[v.id])?,
+          }
+        }
+        Ok(())
+      }
+    }
+    Displayer(word, self)
+  }
+
+  #[allow(dead_code)]
+  fn display_formula(&self) -> impl fmt::Display + '_ {
+    struct Displayer<'a>(&'a Solver);
+    impl<'a> fmt::Display for Displayer<'a> {
+      fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for (clause_ptr, clause) in self.0.formula.0.iter() {
+          write!(
+            f,
+            "{}",
+            self
+              .0
+              .display_word(clause.equation.lhs.0.iter().map(|(_, x)| x))
+          )?;
+          write!(f, " = ")?;
+          write!(
+            f,
+            "{}",
+            self
+              .0
+              .display_word(clause.equation.rhs.0.iter().map(|(_, x)| x))
+          )?;
+          if clause_ptr != self.0.formula.0.back().unwrap() {
+            write!(f, "; ")?;
+          }
+        }
+        Ok(())
+      }
+    }
+    Displayer(self)
+  }
+
   /// Assert invariants related to self.var_ptrs and self.assignments.
   #[allow(dead_code)]
   fn assert_vars_invariants(&self) {
+    assert_eq!(self.no_vars, self.var_names.len());
     // Check that self.var_ptrs is sound.
     for var in (0..self.no_vars).map(|id| Variable { id }) {
       assert!(
         !(self.assignments.contains_key(var.id) && self.var_ptrs.contains_key(var.id)),
         "self.assignments and self.var_ptrs should be disjunct."
+      );
+      assert!(
+        !(self.splits.contains_key(var.id) && self.assignments.contains_key(var.id)),
+        "self.splits and self.assignments should be disjunct."
+      );
+      assert!(
+        !(self.splits.contains_key(var.id) && !self.var_ptrs.contains_key(var.id)),
+        "self.splits should be a subset of  self.var_ptrs."
       );
       if self.var_ptrs.contains_key(var.id) {
         // Check that all pointers actually point to terms with var.
@@ -223,70 +294,44 @@ impl Solver {
     }
   }
 
-  /// Assert invariants about self.splits and self.updated_clauses.
+  /// Assert invariants about self.updated_clauses.
   #[allow(dead_code)]
-  fn assert_splits_and_updated_invariants(&self) {
-    // Check that self.splits and self.updated_clauses point to valid clauses.
-    self
-      .splits
-      .keys()
-      .for_each(|x| assert!(self.formula.0.contains_ptr(ListPtr::from_usize(x))));
+  fn assert_updated_invariants(&self) {
+    // Check that self.updated_clauses point to valid clauses.
     self
       .updated_clauses
       .iter()
       .for_each(|x| assert!(self.formula.0.contains_ptr(ListPtr::from_usize(x))));
-    // Check that self.splits and self.updated_clauses are valid.
-    for (clause_ptr, clause) in self.formula.0.iter() {
-      if self.updated_clauses.contains(clause_ptr.to_usize()) {
-        assert!(!self.splits.contains_key(clause_ptr.to_usize()));
-      }
-      if let Some(branches) = self.splits.get(clause_ptr.to_usize()) {
-        // Check that the branches points to valid splits.
-        assert!(!self.updated_clauses.contains(clause_ptr.to_usize()));
-        let Clause {
-          equation: Equation { lhs, rhs },
-        } = clause;
-        for (var, _) in branches.0.iter() {
-          assert!(self.var_ptrs.contains_key(var.id));
-          let lhs_head = lhs.0.head().map(|x| *lhs.0.get(x));
-          let rhs_head = rhs.0.head().map(|x| *rhs.0.get(x));
-          let some_var = Some(Term::Variable(*var));
-          assert!(
-            lhs_head == some_var || rhs_head == some_var,
-            "LHS head {:?} or RHS head {:?} should be the variable {:?}",
-            lhs_head,
-            rhs_head,
-            var
-          );
-        }
-      }
-    }
   }
 
   fn assert_invariants(&self) {
     self.assert_vars_invariants();
-    self.assert_splits_and_updated_invariants();
+    self.assert_updated_invariants();
   }
 
   /// Solve the formula.
   pub fn solve(&mut self) -> Result<(), Unsat> {
     loop {
+      println!("Solving formula: {}", self.display_formula());
       self.assert_invariants();
       // Run the fix point function.
       if let Err(Unsat) = self.fix_point() {
         // This branch is unsat.
+        println!("Unsatisfiable branch;");
         self.take_next_branch()?;
         continue;
       }
       // Perform a split.
-      let Some((_, branches)) = self.splits.drain().next() else {
+      let Some((branch_var, branches)) = self.splits.drain().next() else {
         // There are no splits so we've reached SAT!
+        println!("SAT");
         return Ok(());
       };
+      println!("New split;");
       let grand_parent = self.parent.take();
       let mut parent = self.clone();
       parent.parent = grand_parent;
-      self.parent = Some((Box::new(parent), branches));
+      self.parent = Some((Box::new(parent), (Variable { id: branch_var }, branches)));
       self.take_next_branch()?;
     }
   }
@@ -295,30 +340,28 @@ impl Solver {
   /// branches exist.
   fn take_next_branch(&mut self) -> Result<(), Unsat> {
     loop {
-      let Some((mut parent, mut branches)) = self.parent.take() else {
+      let Some((mut parent, (branch_var, mut branches))) = self.parent.take() else {
+        println!("UNSAT");
         return Err(Unsat);
       };
-      if let Some((var, replacement)) = branches.0.pop() {
+      if let Some(branch) = branches.pop_first() {
         // Restor self to parent.
         let grand_parent = parent.parent.take();
         *self = (*parent).clone();
         parent.parent = grand_parent;
-        self.parent = Some((parent, branches));
+        self.parent = Some((parent, (branch_var, branches)));
         // Make the split.
-        // Add all fresh variables.
-        let mut replacement_fixed: ArrayVec<Term, 2> = ArrayVec::new();
-        for x in replacement.iter() {
-          match x {
-            TermOrFreshVar::Term(t) => replacement_fixed.push(*t),
-            FreshVar => replacement_fixed.push(Term::Variable(self.add_fresh_var())),
-          }
-        }
-        self.assert_invariants();
-        self.fix_var(var, replacement_fixed);
-        self.assert_invariants();
+        let replacement = branch.terms(|| self.add_fresh_var(branch_var));
+        println!(
+          "Branching: {} = {}",
+          &self.var_names[branch_var.id],
+          self.display_word(replacement.iter())
+        );
+        self.fix_var(branch_var, replacement);
         break Ok(());
       }
       // There are no more branches so let's backtrack to the grand parent.
+      println!("Backtracking...");
       self.parent = parent.parent.take();
     }
   }
@@ -331,8 +374,14 @@ impl Solver {
         self.updated_clauses.remove(clause_ptr.to_usize());
         match self.simplify_equation(clause_ptr)? {
           SimplificationResult::UnitProp(x) => unit_propagations.push((clause_ptr, x)),
-          SimplificationResult::Split(s) => {
-            self.splits.insert(clause_ptr.to_usize(), s);
+          SimplificationResult::Split(branches) => {
+            for (var, val) in branches.0 {
+              self
+                .splits
+                .entry(var.id)
+                .or_insert_with(BTreeSet::new)
+                .insert(val);
+            }
           }
         }
       }
@@ -558,7 +607,7 @@ impl Solver {
             return Ok(UnitProp(UnitPropRhs(x)));
           } else {
             return Ok(Split(Branches(
-              [(x, ArrayVec::new()), (x, [a.into(), FreshVar].into())]
+              [(x, BranchVal::Empty), (x, BranchVal::TerminalAndFresh(a))]
                 .into_iter()
                 .collect(),
             )));
@@ -570,7 +619,7 @@ impl Solver {
             return Ok(UnitProp(UnitPropLhs(x)));
           } else {
             return Ok(Split(Branches(
-              [(x, ArrayVec::new()), (x, [a.into(), FreshVar].into())]
+              [(x, BranchVal::Empty), (x, BranchVal::TerminalAndFresh(a))]
                 .into_iter()
                 .collect(),
             )));
@@ -587,9 +636,9 @@ impl Solver {
           } else {
             return Ok(Split(Branches(
               [
-                (x, [y.into()].into_iter().collect()),
-                (x, [y.into(), FreshVar].into()),
-                (y, [x.into(), FreshVar].into()),
+                (x, BranchVal::EqualVar(y)),
+                (x, BranchVal::VarAndFresh(y)),
+                (y, BranchVal::VarAndFresh(x)),
               ]
               .into(),
             )));
@@ -611,14 +660,18 @@ impl Solver {
         self.var_ptrs[var.id].remove(clause_ptr.to_usize());
         if self.var_ptrs[var.id].is_empty() {
           self.var_ptrs.remove(var.id);
+          self.splits.remove(var.id);
         }
       }
     }
     for (_, term) in rhs.0.iter() {
       if let Term::Variable(var) = term {
-        self.var_ptrs[var.id].remove(clause_ptr.to_usize());
-        if self.var_ptrs[var.id].is_empty() {
-          self.var_ptrs.remove(var.id);
+        if let vec_map::Entry::Occupied(mut entry) = self.var_ptrs.entry(var.id) {
+          entry.get_mut().remove(clause_ptr.to_usize());
+          if entry.get().is_empty() {
+            entry.remove();
+            self.splits.remove(var.id);
+          }
         }
       }
     }
@@ -636,9 +689,9 @@ impl Solver {
         .find(|x| *x == Term::Variable(var))
         .is_none()
     );
+    self.splits.remove(var.id);
     for (clause_id, (lhs_ptrs, rhs_ptrs)) in self.var_ptrs[var.id].clone().iter() {
       self.updated_clauses.insert(clause_id);
-      self.splits.remove(clause_id);
       let clause_ptr = ListPtr::from_usize(clause_id);
       let Clause {
         equation: Equation { lhs, rhs },
@@ -681,9 +734,11 @@ impl Solver {
   }
 
   /// Add a fresh variable and increment self.no_vars.
-  fn add_fresh_var(&mut self) -> Variable {
+  fn add_fresh_var(&mut self, from: Variable) -> Variable {
     let new_var = Variable { id: self.no_vars };
     self.no_vars += 1;
+    let name = self.var_names[from.id].clone() + "'";
+    self.var_names.push(name);
     new_var
   }
 }
@@ -697,7 +752,7 @@ mod tests {
   #[test]
   fn test_solver() {
     let formula_1 = Cnf(VecList::new());
-    assert_eq!(Solver::new(formula_1, 0).solve(), Ok(()));
+    assert_eq!(Solver::new(formula_1, 0, vec![]).solve(), Ok(()));
     let formula_2 = Cnf(
       [Clause {
         equation: Equation {
@@ -708,7 +763,7 @@ mod tests {
       .into_iter()
       .collect(),
     );
-    assert_eq!(Solver::new(formula_2, 0).solve(), Ok(()));
+    assert_eq!(Solver::new(formula_2, 0, vec![]).solve(), Ok(()));
     let formula_3 = Cnf(
       [Clause {
         equation: Equation {
@@ -719,7 +774,7 @@ mod tests {
       .into_iter()
       .collect(),
     );
-    assert_eq!(Solver::new(formula_3, 0).solve(), Err(Unsat));
+    assert_eq!(Solver::new(formula_3, 0, vec![]).solve(), Err(Unsat));
   }
 
   #[test]
@@ -733,13 +788,13 @@ mod tests {
         .unwrap()
     };
     for test_i in 0..1024 {
-      if test_i % 16 == 0 {
+      if true {
         println!("Test iteration: {test_i}");
       }
       let n_clauses = rng.gen_range(0..=3);
       let mut lhss = Vec::<String>::with_capacity(n_clauses);
       let mut rhss = Vec::<String>::with_capacity(n_clauses);
-      for i in 0..n_clauses {
+      for _ in 0..n_clauses {
         let str_len = rng.gen_range(0..=8);
         let string = (0..str_len)
           .map(|_| if rng.gen() { 'a' } else { 'b' })
@@ -803,11 +858,15 @@ mod tests {
           })
           .collect(),
       );
-      println!("Solving:");
-      for (lhs, rhs) in lhss.iter().zip(rhss.iter()) {
-        println!("  {lhs} = {rhs}");
-      }
-      let mut solver = Solver::new(cnf, n_variables);
+      let mut solver = Solver::new(
+        cnf,
+        n_variables,
+        var_names
+          .iter()
+          .take(n_variables)
+          .map(|x| x.to_string())
+          .collect(),
+      );
       assert!(solver.solve().is_ok());
     }
   }
