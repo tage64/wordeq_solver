@@ -7,6 +7,9 @@ use bit_set::BitSet;
 use vec_list::{ListPtr, VecList};
 use vec_map::VecMap;
 
+const MAX_DEPTH: usize = 16;
+const INITIAL_MAX_DEPTH: usize = 4;
+
 /// A terminal (a character).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Terminal(pub char);
@@ -46,9 +49,12 @@ pub struct Clause {
 #[derive(Debug, Clone)]
 pub struct Cnf(pub VecList<Clause>);
 
-/// Marker type for unsat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Unsat;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnsatOrUnknown {
+  Unsat,
+  Unknown,
+}
+pub use UnsatOrUnknown::*;
 
 /// A result returned from the simplify_clause function.
 #[derive(Debug, Clone)]
@@ -145,6 +151,7 @@ pub struct Solver {
   /// The parent of this node in the search tree together with the other branches to try under that
   /// parent.
   parent: Option<ParentNode>,
+  max_depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +204,7 @@ impl Solver {
       splits: BTreeMap::new(),
       splits_for_clause: VecMap::new(),
       parent: None,
+      max_depth: INITIAL_MAX_DEPTH,
     }
   }
 
@@ -254,7 +262,7 @@ impl Solver {
     Displayer(self)
   }
 
-  #[allow(dead_code)]
+  #[cfg(debug_assertions)]
   fn assert_invariants(&self) {
     // Assert invariants related to self.var_ptrs and self.assignments.
     assert_eq!(self.no_vars, self.var_names.len());
@@ -342,64 +350,87 @@ impl Solver {
     }
     assert_eq!(depth, 0);
   }
+  #[cfg(not(debug_assertions))]
+  fn assert_invariants(&self) {}
 
   /// Solve the formula.
-  pub fn solve(&mut self) -> Result<(), Unsat> {
-    loop {
-      println!(
-        "{:depth$}Solving formula: {}",
-        "",
-        self.display_formula(),
-        depth = self.depth()
-      );
-      self.assert_invariants();
-      // Run the fix point function.
-      let fix_point_res = self.fix_point();
-      println!(
-        "{:depth$}After fix_point(): {}",
-        "",
-        self.display_formula(),
-        depth = self.depth()
-      );
-      if let Err(Unsat) = fix_point_res {
-        // This branch is unsat.
-        println!("{:1$}Unsatisfiable branch;", "", self.depth());
-        self.take_next_branch()?;
-        continue;
+  pub fn solve(&mut self) -> Result<(), UnsatOrUnknown> {
+    while self.max_depth <= MAX_DEPTH {
+      let mut unknown_branches = 0;
+      loop {
+        log::trace!(
+          "{:depth$}Solving formula: {}",
+          "",
+          self.display_formula(),
+          depth = self.depth()
+        );
+        self.assert_invariants();
+        // Run the fix point function.
+        let fix_point_res = self.fix_point();
+        log::trace!(
+          "{:depth$}After fix_point(): {}",
+          "",
+          self.display_formula(),
+          depth = self.depth()
+        );
+        if let Err(e) = fix_point_res {
+          debug_assert_eq!(e, Unsat);
+          // This branch is unsat.
+          log::trace!("{:1$}Unsatisfiable branch;", "", self.depth());
+          if let Err(()) = self.take_next_branch() {
+            break;
+          }
+          continue;
+        }
+        let depth = self.depth() + 1;
+        if depth >= self.max_depth {
+          unknown_branches += 1;
+          if let Err(()) = self.take_next_branch() {
+            break;
+          }
+          continue;
+        }
+        // Perform a split.
+        let Some((branches, clause_ptr)) = self.splits.pop_first() else {
+          // There are no splits so we've reached SAT!
+          log::trace!("SAT");
+          return Ok(());
+        };
+        self.splits_for_clause.remove(clause_ptr.to_usize());
+        log::trace!("{:1$}New split;", "", self.depth());
+        let grand_parent = self.parent.take();
+        let mut parent = self.clone();
+        parent.parent = grand_parent;
+        self.parent = Some(ParentNode {
+          solver: Box::new(parent),
+          branches,
+          branch_idx: 0,
+          depth,
+        });
+        if let Err(()) = self.take_next_branch() {
+          break;
+        }
       }
-      // Perform a split.
-      let Some((branches, clause_ptr)) = self.splits.pop_first() else {
-        // There are no splits so we've reached SAT!
-        println!("SAT");
-        return Ok(());
-      };
-      self.splits_for_clause.remove(clause_ptr.to_usize());
-      println!("{:1$}New split;", "", self.depth());
-      let depth = self.depth() + 1;
-      let grand_parent = self.parent.take();
-      let mut parent = self.clone();
-      parent.parent = grand_parent;
-      self.parent = Some(ParentNode {
-        solver: Box::new(parent),
-        branches,
-        branch_idx: 0,
-        depth,
-      });
-      self.take_next_branch()?;
+      if unknown_branches == 0 {
+        return Err(Unsat);
+      }
+      self.max_depth *= 2;
+      log::trace!("Increasing max depth to {}", self.max_depth);
     }
+    return Err(Unknown);
   }
 
-  /// Take the next branch at the parent, grand parent or older ancestor. Returns Unsat if no more
+  /// Take the next branch at the parent, grand parent or older ancestor. Returns Err(()) if no more
   /// branches exist.
-  fn take_next_branch(&mut self) -> Result<(), Unsat> {
+  fn take_next_branch(&mut self) -> Result<(), ()> {
     loop {
       let Some(mut parent) = self.parent.take() else {
-        println!("UNSAT");
-        return Err(Unsat);
+        log::trace!("UNSAT");
+        return Err(());
       };
       let depth = parent.depth - 1;
       if parent.branch_idx < parent.branches.len() {
-        println!(
+        log::trace!(
           "{:depth$}There are {} branches here.",
           "",
           parent.branches.len() - parent.branch_idx,
@@ -414,7 +445,7 @@ impl Solver {
         parent.branch_idx += 1;
         self.parent = Some(parent);
         // make the split.
-        println!(
+        log::trace!(
           "{:depth$}branching: {} = {}",
           "",
           &self.var_names[branch_var.id],
@@ -425,18 +456,22 @@ impl Solver {
       }
       // There are no more branches so let's backtrack to the grand parent.
       *self = *parent.solver;
-      println!("{:depth$}Back tracking to: {}", "", self.display_formula(),);
+      log::trace!("{:depth$}Back tracking to: {}", "", self.display_formula(),);
     }
   }
 
   /// In a loop: Simplify the equations and perform unit propagation.
-  fn fix_point(&mut self) -> Result<(), Unsat> {
+  fn fix_point(&mut self) -> Result<(), UnsatOrUnknown> {
     while !self.updated_clauses.is_empty() {
-      let mut unit_propagations = Vec::new();
+      let mut unit_propagation = None;
       while let Some(clause_ptr) = self.updated_clauses.iter().next().map(ListPtr::from_usize) {
         self.updated_clauses.remove(clause_ptr.to_usize());
         match self.simplify_equation(clause_ptr)? {
-          SimplificationResult::UnitProp(x) => unit_propagations.push((clause_ptr, x)),
+          SimplificationResult::UnitProp(x) => {
+            if unit_propagation.is_none() {
+              unit_propagation = Some((clause_ptr, x));
+            }
+          }
           SimplificationResult::Split(branches) => {
             if let Some(prev_clause) = self.splits.insert(branches.clone(), clause_ptr) {
               self.splits_for_clause.remove(prev_clause.to_usize());
@@ -449,7 +484,7 @@ impl Solver {
       }
 
       // Perform unit propagations.
-      for (clause_ptr, unit_prop) in unit_propagations.into_iter() {
+      if let Some((clause_ptr, unit_prop)) = unit_propagation {
         self.assert_invariants();
         let Clause {
           equation: Equation { lhs, rhs },
@@ -552,7 +587,10 @@ impl Solver {
   }
 
   /// Simplify an equation as much as possible.
-  fn simplify_equation(&mut self, clause_ptr: ListPtr) -> Result<SimplificationResult, Unsat> {
+  fn simplify_equation(
+    &mut self,
+    clause_ptr: ListPtr,
+  ) -> Result<SimplificationResult, UnsatOrUnknown> {
     use SimplificationResult::*;
     let Clause {
       equation: Equation { lhs, rhs },
@@ -801,6 +839,7 @@ impl Solver {
 
 #[cfg(test)]
 mod tests {
+  use flexi_logger::Logger;
   use rand::prelude::*;
 
   use super::*;
@@ -835,6 +874,12 @@ mod tests {
 
   #[test]
   fn random_sat_tests() {
+    let mut logger = Logger::try_with_env_or_str("warn")
+      .unwrap()
+      .format(|f, _, r| write!(f, "{}", r.args()))
+      .log_to_stdout()
+      .start()
+      .unwrap();
     let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42);
     let var_names: [&str; 8] = ["X", "Y", "Z", "U", "V", "W", "P", "Q"];
     let var_index = |var_name: char| {
@@ -843,10 +888,12 @@ mod tests {
         .position(|x| x.chars().next().unwrap() == var_name)
         .unwrap()
     };
-    for test_i in 0..1024 {
-      if true {
-        println!("Test iteration: {test_i}");
-      }
+    // The 286th iteration takes a lot of time.
+    for test_i in 0..285 {
+      //if test_i == 285 {
+      //  logger.parse_new_spec("trace").unwrap();
+      //}
+      log::info!("Test iteration: {test_i}");
       let n_clauses = rng.gen_range(0..=3);
       let mut lhss = Vec::<String>::with_capacity(n_clauses);
       let mut rhss = Vec::<String>::with_capacity(n_clauses);

@@ -217,12 +217,11 @@ impl<T> VecList<T> {
 
   /// Remove an element.
   pub fn remove(&mut self, remove_ptr: ListPtr) -> T {
-    let Entry::Occupied(removed_entry) = mem::replace(
-      &mut self.entries[remove_ptr.to_usize()],
-      Entry::Vacant {
+    let Entry::Occupied(removed_entry) =
+      mem::replace(&mut self.entries[remove_ptr.to_usize()], Entry::Vacant {
         next_vacant: self.vacant_head,
-      },
-    ) else {
+      })
+    else {
       panic!("No occupied entry at remove pointer: {:?}", remove_ptr)
     };
     self.vacant_head = Some(remove_ptr);
