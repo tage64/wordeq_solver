@@ -61,6 +61,16 @@ impl<T> VecList<T> {
     }
   }
 
+  /// Create a new empty list with a capacity.
+  pub fn with_capacity(cap: usize) -> Self {
+    Self {
+      entries: Vec::with_capacity(cap),
+      head: None,
+      back: None,
+      vacant_head: None,
+    }
+  }
+
   /// Check if the list contains an element at a certain ptr. Note that you might suffer from the
   /// ABA problem, that is if you delete an item and add a new item, the pointer to the deleted
   /// item might point to the new item.

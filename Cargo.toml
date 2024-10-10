@@ -1,23 +1,23 @@
 [package]
-name = "smt_str_par"
+name = "smt_str_solver"
 version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["no_trace_logging"]
-no_trace_logging = ["log/max_level_debug"]
+trace_logging = []
 
 [dependencies]
+anyhow = "1.0.89"
 arrayvec = "0.7.6"
 bit-set = "0.8.0"
+compact_str = "0.8.0"
+derive_more = { version = "1.0.0", features = ["display"] }
+flexi_logger = { version = "0.29.2", default-features = false }
 log = "0.4.22"
 nonmax = "0.5.5"
-vec_map = "0.8.2"
-
-[dev-dependencies]
-flexi_logger = { version = "0.29.2", default-features = false }
 rand = { version = "0.8.5", default-features = false }
 rand_xoshiro = "0.6.0"
+vec_map = "0.8.2"
 
 [profile.release]
 codegen-units = 1

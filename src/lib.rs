@@ -1,60 +1,58 @@
-mod vec_list;
+mod formula;
+use std::cell::RefCell;
+pub mod vec_list;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
 use bit_set::BitSet;
-use vec_list::{ListPtr, VecList};
+use compact_str::CompactString;
+pub use formula::*;
+use vec_list::ListPtr;
 use vec_map::VecMap;
 
 const MAX_DEPTH: usize = 16;
 const INITIAL_MAX_DEPTH: usize = 4;
+const MAX_DEPTH_STEP: usize = 2;
 
-/// A terminal (a character).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Terminal(pub char);
-
-/// A variable with a unique id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Variable {
-  pub id: usize,
-}
-
-/// A terminal or variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Term {
-  Terminal(Terminal),
-  Variable(Variable),
-}
-
-/// A word is a list of terms.
-#[derive(Debug, Clone)]
-pub struct Word(pub VecList<Term>);
-
-/// An equality constraint.
-#[derive(Debug, Clone)]
-pub struct Equation {
-  pub lhs: Word,
-  pub rhs: Word,
-}
-
-/// A clause in a conjunction.
-#[derive(Debug, Clone)]
-pub struct Clause {
-  /// This could be extended to be disjunction and negations but it is only an equation for now.
-  pub equation: Equation,
-}
-
-/// A list of clauses.
-#[derive(Debug, Clone)]
-pub struct Cnf(pub VecList<Clause>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UnsatOrUnknown {
+#[derive(Debug, derive_more::Display)]
+pub enum Solution {
+  #[display("SAT")]
+  Sat(SatResult),
+  #[display("UNSAT")]
   Unsat,
   Unknown,
+  Cancelled,
 }
-pub use UnsatOrUnknown::*;
+pub use Solution::*;
+
+/// Try to solve a formula.
+///
+/// Takes in a closure (node_watcher) which may cancel the search at any node by returning
+/// `ControlFlow::Break(_)`. It will be called at every new node, right before the fix point
+/// function.
+pub fn solve(formula: Formula, node_watcher: impl FnMut() -> ControlFlow<()>) -> Solution {
+  Solver::new(formula.cnf, &formula.var_names).solve(formula.var_names, node_watcher)
+}
+
+/// Solve with a timeout.
+pub fn solve_with_timeout(formula: Formula, timeout: Duration) -> Solution {
+  let start_timestamp = Instant::now();
+  solve(formula, || {
+    if start_timestamp.elapsed() > timeout {
+      ControlFlow::Break(())
+    } else {
+      ControlFlow::Continue(())
+    }
+  })
+}
+
+/// Solves the formula with no timeout.
+pub fn solve_no_timeout(formula: Formula) -> Solution {
+  solve(formula, || ControlFlow::Continue(()))
+}
 
 /// A result returned from the simplify_clause function.
 #[derive(Debug, Clone)]
@@ -87,6 +85,7 @@ use UnitProp::*;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Branches {
   /// One variable equal to only the empty string.
+  #[expect(dead_code)]
   Empty(Variable),
   /// One variable equal to the empty string or a terminal followed by a fresh variable.
   EmptyOrTerminal(Variable, Terminal),
@@ -127,16 +126,17 @@ impl Branches {
 }
 
 #[derive(Debug, Clone)]
-pub struct Solver {
+struct Solver {
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
   formula: Cnf,
   /// The number of variables. Maybe sparse, that is, some of the previously used variables might
   /// have been fixed but they still count.
   no_vars: usize,
   /// assignments[x] = the value for variable with id x.
-  pub assignments: VecMap<Vec<Term>>,
+  assignments: VecMap<Vec<Term>>,
+  #[cfg(feature = "trace_logging")]
   /// var_names[x] = the name for variable with id x.
-  var_names: Vec<String>,
+  var_names: Vec<CompactString>,
   /// var_ptrs is a map with variable ids as keys, the values are maps of all clauses where that
   /// variable exists, they have clause pointers as keys and pairs (lhs_ptrs, rhs_ptrs) as
   /// values, where lhs_ptrs and rhs_ptrs are bitsets of pointers to
@@ -166,8 +166,8 @@ struct ParentNode {
 }
 
 impl Solver {
-  pub fn new(formula: Cnf, no_vars: usize, var_names: Vec<String>) -> Self {
-    assert_eq!(no_vars, var_names.len());
+  fn new(formula: Cnf, var_names: &Vec<CompactString>) -> Self {
+    let no_vars = var_names.len();
     let mut var_ptrs = VecMap::with_capacity(no_vars);
     for (clause_ptr, clause) in formula.0.iter() {
       for (term_ptr, term) in clause.equation.lhs.0.iter() {
@@ -197,7 +197,8 @@ impl Solver {
     Self {
       formula,
       no_vars,
-      var_names,
+      #[cfg(feature = "trace_logging")]
+      var_names: var_names.clone(),
       assignments: VecMap::new(),
       var_ptrs,
       updated_clauses,
@@ -208,63 +209,10 @@ impl Solver {
     }
   }
 
-  #[allow(dead_code)]
-  fn display_word<'a>(
-    &'a self,
-    word: impl Iterator<Item = &'a Term> + Clone + 'a,
-  ) -> impl fmt::Display + 'a {
-    struct Displayer<'a, I>(I, &'a Solver);
-    impl<'a, I> fmt::Display for Displayer<'a, I>
-    where
-      I: Iterator<Item = &'a Term> + Clone + 'a,
-    {
-      fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for x in self.0.clone() {
-          match x {
-            Term::Terminal(Terminal(t)) => write!(f, "{t}")?,
-            Term::Variable(v) => write!(f, "{}", &self.1.var_names[v.id])?,
-          }
-        }
-        Ok(())
-      }
-    }
-    Displayer(word, self)
-  }
-
-  #[allow(dead_code)]
-  fn display_formula(&self) -> impl fmt::Display + '_ {
-    struct Displayer<'a>(&'a Solver);
-    impl<'a> fmt::Display for Displayer<'a> {
-      fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (clause_ptr, clause) in self.0.formula.0.iter() {
-          write!(
-            f,
-            "{}",
-            self
-              .0
-              .display_word(clause.equation.lhs.0.iter().map(|(_, x)| x))
-          )?;
-          write!(f, " = ")?;
-          write!(
-            f,
-            "{}",
-            self
-              .0
-              .display_word(clause.equation.rhs.0.iter().map(|(_, x)| x))
-          )?;
-          if clause_ptr != self.0.formula.0.back().unwrap() {
-            write!(f, "; ")?;
-          }
-        }
-        Ok(())
-      }
-    }
-    Displayer(self)
-  }
-
   #[cfg(debug_assertions)]
   fn assert_invariants(&self) {
     // Assert invariants related to self.var_ptrs and self.assignments.
+    #[cfg(feature = "trace_logging")]
     assert_eq!(self.no_vars, self.var_names.len());
     // Check that self.var_ptrs is sound.
     for var in (0..self.no_vars).map(|id| Variable { id }) {
@@ -354,28 +302,45 @@ impl Solver {
   fn assert_invariants(&self) {}
 
   /// Solve the formula.
-  pub fn solve(&mut self) -> Result<(), UnsatOrUnknown> {
+  ///
+  /// Takes in a closure (node_watcher) which may cancel the search at any node by returning
+  /// `ControlFlow::Break(_)`. It will be called at every new node, right before the fix point
+  /// function.
+  ///
+  /// The `var_names` argument is moved into the `SatResult` when finished.
+  fn solve(
+    mut self,
+    var_names: Vec<CompactString>,
+    mut node_watcher: impl FnMut() -> ControlFlow<()>,
+  ) -> Solution {
+    let original_formula = self.formula.clone();
+    let restart_node = self.clone();
     while self.max_depth <= MAX_DEPTH {
       let mut unknown_branches = 0;
       loop {
+        if node_watcher().is_break() {
+          return Cancelled;
+        }
+        #[cfg(feature = "trace_logging")]
         log::trace!(
           "{:depth$}Solving formula: {}",
           "",
-          self.display_formula(),
+          self.formula.display(|x| &self.var_names[x.id]),
           depth = self.depth()
         );
         self.assert_invariants();
         // Run the fix point function.
         let fix_point_res = self.fix_point();
+        #[cfg(feature = "trace_logging")]
         log::trace!(
           "{:depth$}After fix_point(): {}",
           "",
-          self.display_formula(),
+          self.formula.display(|x| &self.var_names[x.id]),
           depth = self.depth()
         );
-        if let Err(e) = fix_point_res {
-          debug_assert_eq!(e, Unsat);
+        if let Err(()) = fix_point_res {
           // This branch is unsat.
+          #[cfg(feature = "trace_logging")]
           log::trace!("{:1$}Unsatisfiable branch;", "", self.depth());
           if let Err(()) = self.take_next_branch() {
             break;
@@ -393,10 +358,15 @@ impl Solver {
         // Perform a split.
         let Some((branches, clause_ptr)) = self.splits.pop_first() else {
           // There are no splits so we've reached SAT!
+          #[cfg(feature = "trace_logging")]
           log::trace!("SAT");
-          return Ok(());
+          return Sat(SatResult::new(
+            self,
+            Formula::new(original_formula, var_names),
+          ));
         };
         self.splits_for_clause.remove(clause_ptr.to_usize());
+        #[cfg(feature = "trace_logging")]
         log::trace!("{:1$}New split;", "", self.depth());
         let grand_parent = self.parent.take();
         let mut parent = self.clone();
@@ -412,12 +382,14 @@ impl Solver {
         }
       }
       if unknown_branches == 0 {
-        return Err(Unsat);
+        return Unsat;
       }
-      self.max_depth *= 2;
+      self.max_depth += MAX_DEPTH_STEP;
+      #[cfg(feature = "trace_logging")]
       log::trace!("Increasing max depth to {}", self.max_depth);
+      self = restart_node.clone();
     }
-    return Err(Unknown);
+    return Unknown;
   }
 
   /// Take the next branch at the parent, grand parent or older ancestor. Returns Err(()) if no more
@@ -425,15 +397,17 @@ impl Solver {
   fn take_next_branch(&mut self) -> Result<(), ()> {
     loop {
       let Some(mut parent) = self.parent.take() else {
+        #[cfg(feature = "trace_logging")]
         log::trace!("UNSAT");
         return Err(());
       };
-      let depth = parent.depth - 1;
       if parent.branch_idx < parent.branches.len() {
+        #[cfg(feature = "trace_logging")]
         log::trace!(
-          "{:depth$}There are {} branches here.",
+          "{:2$}There are {} branches here.",
           "",
           parent.branches.len() - parent.branch_idx,
+          parent.depth - 1,
         );
         // restor self to parent.
         let grand_parent = parent.solver.parent.take();
@@ -445,23 +419,31 @@ impl Solver {
         parent.branch_idx += 1;
         self.parent = Some(parent);
         // make the split.
+        #[cfg(feature = "trace_logging")]
         log::trace!(
-          "{:depth$}branching: {} = {}",
+          "{:3$}branching: {} = {}",
           "",
           &self.var_names[branch_var.id],
-          self.display_word(replacement.iter())
+          display_word(replacement.iter(), |x| &self.var_names[x.id]),
+          self.depth() - 1,
         );
         self.fix_var(branch_var, replacement);
         break Ok(());
       }
       // There are no more branches so let's backtrack to the grand parent.
       *self = *parent.solver;
-      log::trace!("{:depth$}Back tracking to: {}", "", self.display_formula(),);
+      #[cfg(feature = "trace_logging")]
+      log::trace!(
+        "{:2$}Back tracking to: {}",
+        "",
+        self.formula.display(|x| &self.var_names[x.id]),
+        self.depth(),
+      );
     }
   }
 
-  /// In a loop: Simplify the equations and perform unit propagation.
-  fn fix_point(&mut self) -> Result<(), UnsatOrUnknown> {
+  /// In a loop: Simplify the equations and perform unit propagation. Return Err(()) on unsat.
+  fn fix_point(&mut self) -> Result<(), ()> {
     while !self.updated_clauses.is_empty() {
       let mut unit_propagation = None;
       while let Some(clause_ptr) = self.updated_clauses.iter().next().map(ListPtr::from_usize) {
@@ -495,7 +477,7 @@ impl Solver {
             let mut to_be_empty = BitSet::new(); // All variables in RHS.
             for (_, term) in rhs.0.iter() {
               match *term {
-                Term::Terminal(_) => return Err(Unsat),
+                Term::Terminal(_) => return Err(()),
                 Term::Variable(x) => {
                   to_be_empty.insert(x.id);
                 }
@@ -509,7 +491,7 @@ impl Solver {
             let mut to_be_empty = BitSet::new(); // All variables in LHS.
             for (_, term) in lhs.0.iter() {
               match *term {
-                Term::Terminal(_) => return Err(Unsat),
+                Term::Terminal(_) => return Err(()),
                 Term::Variable(x) => {
                   to_be_empty.insert(x.id);
                 }
@@ -530,7 +512,7 @@ impl Solver {
               let mut to_be_empty = BitSet::new(); // All variables in RHS which are not var.
               for (_, term) in rhs.0.iter() {
                 match *term {
-                  Term::Terminal(_) => return Err(Unsat),
+                  Term::Terminal(_) => return Err(()),
                   Term::Variable(x) => {
                     if x == var {
                       var_occurences += 1;
@@ -559,7 +541,7 @@ impl Solver {
               let mut to_be_empty = BitSet::new(); // All variables in LHS which are not var.
               for (_, term) in lhs.0.iter() {
                 match *term {
-                  Term::Terminal(_) => return Err(Unsat),
+                  Term::Terminal(_) => return Err(()),
                   Term::Variable(x) => {
                     if x == var {
                       var_occurences += 1;
@@ -586,11 +568,8 @@ impl Solver {
     Ok(())
   }
 
-  /// Simplify an equation as much as possible.
-  fn simplify_equation(
-    &mut self,
-    clause_ptr: ListPtr,
-  ) -> Result<SimplificationResult, UnsatOrUnknown> {
+  /// Simplify an equation as much as possible. Return Err(()) on unsat.
+  fn simplify_equation(&mut self, clause_ptr: ListPtr) -> Result<SimplificationResult, ()> {
     use SimplificationResult::*;
     let Clause {
       equation: Equation { lhs, rhs },
@@ -605,7 +584,7 @@ impl Solver {
         (None, None) => return Ok(UnitProp(BothSidesEmpty)),
         (None, Some(Term::Variable(_))) => {
           if let Term::Terminal(_) = rhs.0.get(rhs.0.head().unwrap()) {
-            return Err(Unsat);
+            return Err(());
           } else {
             // LHS is empty and RHS is empty or starts and ends with variables.
             return Ok(UnitProp(UnitPropEmptyLhs));
@@ -613,13 +592,13 @@ impl Solver {
         }
         (Some(Term::Variable(_)), None) => {
           if let Term::Terminal(_) = lhs.0.get(lhs.0.head().unwrap()) {
-            return Err(Unsat);
+            return Err(());
           } else {
             // RHS is empty and LHS starts and ends with variables.
             return Ok(UnitProp(UnitPropEmptyRhs));
           }
         }
-        (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(Unsat),
+        (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(()),
         (Some(x), Some(y)) if x == y => {
           // Both sides ends with the same terminal or variable.
           lhs.0.remove(lhs_back_ptr.unwrap());
@@ -644,7 +623,7 @@ impl Solver {
         }
         // Rule 6: Both sides end with distinct terminals:
         (Some(Term::Terminal(_)), Some(Term::Terminal(_))) => {
-          return Err(Unsat);
+          return Err(());
         }
         (Some(Term::Variable(_)), Some(_)) | (Some(_), Some(Term::Variable(_))) => break,
       }
@@ -659,7 +638,7 @@ impl Solver {
         (None, None) => return Ok(UnitProp(BothSidesEmpty)),
         (None, Some(Term::Variable(_))) => {
           if let Term::Terminal(_) = rhs.0.get(rhs.0.head().unwrap()) {
-            return Err(Unsat);
+            return Err(());
           } else {
             // LHS is empty and RHS is empty or starts and ends with variables.
             return Ok(UnitProp(UnitPropEmptyLhs));
@@ -667,13 +646,13 @@ impl Solver {
         }
         (Some(Term::Variable(_)), None) => {
           if let Term::Terminal(_) = lhs.0.get(lhs.0.head().unwrap()) {
-            return Err(Unsat);
+            return Err(());
           } else {
             // RHS is empty and LHS starts and ends with variables.
             return Ok(UnitProp(UnitPropEmptyRhs));
           }
         }
-        (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(Unsat),
+        (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(()),
         (Some(x), Some(y)) if x == y => {
           // Both sides starts with the same terminal or variable.
           lhs.0.remove(lhs_head_ptr.unwrap());
@@ -698,7 +677,7 @@ impl Solver {
         }
         // Rule 6: Both sides start with distinct terminals:
         (Some(Term::Terminal(_)), Some(Term::Terminal(_))) => {
-          return Err(Unsat);
+          return Err(());
         }
         // Rule 7: One side starts with a terminal and the other starts with a variable.
         (Some(Term::Terminal(a)), Some(Term::Variable(x))) => {
@@ -768,8 +747,7 @@ impl Solver {
 
   /// Given a variable and a value, replace all occurences of that variable with the value.
   fn fix_var(&mut self, var: Variable, val: impl IntoIterator<Item = Term> + Clone) {
-    // TODO: Debug assert:
-    assert!(
+    debug_assert!(
       val
         .clone()
         .into_iter()
@@ -823,11 +801,15 @@ impl Solver {
   }
 
   /// Add a fresh variable and increment self.no_vars.
+  #[allow(unused_variables)]
   fn add_fresh_var(&mut self, from: Variable) -> Variable {
     let new_var = Variable { id: self.no_vars };
     self.no_vars += 1;
-    let name = self.var_names[from.id].clone() + "'";
-    self.var_names.push(name);
+    #[cfg(feature = "trace_logging")]
+    {
+      let name = self.var_names[from.id].clone() + "'";
+      self.var_names.push(name);
+    }
     new_var
   }
 
@@ -837,140 +819,139 @@ impl Solver {
   }
 }
 
-#[cfg(test)]
-mod tests {
-  use flexi_logger::Logger;
-  use rand::prelude::*;
-
-  use super::*;
-
-  #[test]
-  fn test_solver() {
-    let formula_1 = Cnf(VecList::new());
-    assert_eq!(Solver::new(formula_1, 0, vec![]).solve(), Ok(()));
-    let formula_2 = Cnf(
-      [Clause {
-        equation: Equation {
-          lhs: Word(VecList::new()),
-          rhs: Word(VecList::new()),
-        },
-      }]
-      .into_iter()
-      .collect(),
-    );
-    assert_eq!(Solver::new(formula_2, 0, vec![]).solve(), Ok(()));
-    let formula_3 = Cnf(
-      [Clause {
-        equation: Equation {
-          lhs: Word([Term::Terminal(Terminal('a'))].into_iter().collect()),
-          rhs: Word(VecList::new()),
-        },
-      }]
-      .into_iter()
-      .collect(),
-    );
-    assert_eq!(Solver::new(formula_3, 0, vec![]).solve(), Err(Unsat));
+impl Solution {
+  /// Get a `SatResult` if it is SAT else `None`.
+  pub fn get_sat(self) -> Option<SatResult> {
+    if let Sat(x) = self { Some(x) } else { None }
   }
 
-  #[test]
-  fn random_sat_tests() {
-    let mut logger = Logger::try_with_env_or_str("warn")
-      .unwrap()
-      .format(|f, _, r| write!(f, "{}", r.args()))
-      .log_to_stdout()
-      .start()
-      .unwrap();
-    let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42);
-    let var_names: [&str; 8] = ["X", "Y", "Z", "U", "V", "W", "P", "Q"];
-    let var_index = |var_name: char| {
-      var_names
-        .iter()
-        .position(|x| x.chars().next().unwrap() == var_name)
-        .unwrap()
+  /// Convenience function to check that this is a correct satisfying solution.
+  pub fn assert_sat(self) -> SatResult {
+    let Sat(mut sat_res) = self else {
+      panic!("Expected a satisfying solution, but it is {self}")
     };
-    // The 286th iteration takes a lot of time.
-    for test_i in 0..285 {
-      //if test_i == 285 {
-      //  logger.parse_new_spec("trace").unwrap();
-      //}
-      log::info!("Test iteration: {test_i}");
-      let n_clauses = rng.gen_range(0..=3);
-      let mut lhss = Vec::<String>::with_capacity(n_clauses);
-      let mut rhss = Vec::<String>::with_capacity(n_clauses);
-      for _ in 0..n_clauses {
-        let str_len = rng.gen_range(0..=8);
-        let string = (0..str_len)
-          .map(|_| if rng.gen() { 'a' } else { 'b' })
-          .collect::<String>();
-        lhss.push(string.clone());
-        rhss.push(string);
-      }
-      let n_variables = rng.gen_range(0..8);
-      let mut vars = Vec::with_capacity(n_variables);
-      for i in 0..n_variables {
-        let len = rng.gen_range(0..4);
-        let val = (0..len)
-          .map(|_| if rng.gen() { 'a' } else { 'b' })
-          .collect::<String>();
-        vars.push((var_names[i], val));
-      }
-      // Replace substrings equal to any variable with a probability of 3/4.
-      for (var_name, val) in vars {
-        for xhs in lhss.iter_mut().chain(rhss.iter_mut()) {
-          while rng.gen_bool(0.75) {
-            let Some(i) = xhs.find(&val) else {
-              break;
-            };
-            xhs.replace_range(i..(i + val.len()), var_name);
+    sat_res.assert_correct();
+    sat_res
+  }
+
+  /// Convenience function to assert that the solution is UNSAT.
+  pub fn assert_unsat(&self) {
+    let Unsat = self else {
+      panic!("Expected solution to be UNSAT but it is {self}");
+    };
+  }
+}
+
+/// A struct returned for a satisfying solution from which it is possible to get the values for all
+/// variables.
+#[derive(Debug)]
+pub struct SatResult {
+  formula: Formula,
+  assignments: AssignedVars,
+  /// The formula where all variables have been substituted to a satisfying solution.
+  substituted_formula: Option<Vec<(CompactString, CompactString)>>,
+}
+
+impl SatResult {
+  fn new(solver: Solver, original_formula: Formula) -> Self {
+    Self {
+      formula: original_formula,
+      assignments: AssignedVars {
+        assignments: solver.assignments,
+        var_cache: VecMap::new(),
+      },
+      substituted_formula: None,
+    }
+  }
+
+  /// Get all clauses ((LHS, RHS) pairs) where all variables have been replaced by terminals
+  /// to form a satisfying solution.
+  pub fn substituted_formula(&mut self) -> &Vec<(CompactString, CompactString)> {
+    self.substituted_formula.get_or_insert_with(|| {
+      let mut substituted_formula = Vec::new();
+      for (_, clause) in self.formula.cnf.0.iter() {
+        let mut substituted_lhs = CompactString::default();
+        for (_, term) in clause.equation.lhs.0.iter() {
+          match *term {
+            Term::Terminal(Terminal(c)) => substituted_lhs.push(c),
+            Term::Variable(var) => substituted_lhs += self.assignments.get_var(var),
           }
         }
+        let mut substituted_rhs = CompactString::default();
+        for (_, term) in clause.equation.rhs.0.iter() {
+          match *term {
+            Term::Terminal(Terminal(c)) => substituted_rhs.push(c),
+            Term::Variable(var) => substituted_rhs += self.assignments.get_var(var),
+          }
+        }
+        substituted_formula.push((substituted_lhs, substituted_rhs));
       }
-      // Create the CNF.
-      let cnf = Cnf(
-        lhss
-          .iter()
-          .zip(rhss.iter())
-          .map(|(lhs_str, rhs_str)| {
-            let lhs = Word(
-              lhs_str
-                .chars()
-                .map(|c| {
-                  if c == 'a' || c == 'b' {
-                    Term::Terminal(Terminal(c))
-                  } else {
-                    Term::Variable(Variable { id: var_index(c) })
-                  }
-                })
-                .collect(),
-            );
-            let rhs = Word(
-              rhs_str
-                .chars()
-                .map(|c| {
-                  if c == 'a' || c == 'b' {
-                    Term::Terminal(Terminal(c))
-                  } else {
-                    Term::Variable(Variable { id: var_index(c) })
-                  }
-                })
-                .collect(),
-            );
-            Clause {
-              equation: Equation { lhs, rhs },
-            }
-          })
-          .collect(),
-      );
-      let mut solver = Solver::new(
-        cnf,
-        n_variables,
-        var_names
-          .iter()
-          .take(n_variables)
-          .map(|x| x.to_string())
-          .collect(),
-      );
-      assert!(solver.solve().is_ok());
+      substituted_formula
+    })
+  }
+
+  /// Get a value for a variable which contribute to a satisfying solution.
+  pub fn get_var(&mut self, var: Variable) -> &str {
+    self.assignments.get_var(var)
+  }
+
+  /// Check that the solution is correct.
+  pub fn assert_correct(&mut self) {
+    self.substituted_formula();
+    for (lhs, rhs) in self.substituted_formula.as_ref().unwrap() {
+      if lhs != rhs {
+        panic!("The solution is not correct: {}.", self.display());
+      }
     }
+  }
+
+  pub fn display(&mut self) -> impl fmt::Display + '_ {
+    struct Displayer<'a>(RefCell<&'a mut SatResult>);
+
+    impl<'a> fmt::Display for Displayer<'a> {
+      fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "\nOriginal equations: {}", self.0.borrow().formula)?;
+        write!(f, "Substituted equations:")?;
+        for (lhs, rhs) in self.0.borrow_mut().substituted_formula() {
+          write!(f, " {lhs} = {rhs};")?;
+        }
+        write!(f, "\nAssignments:")?;
+        let var_names = self.0.borrow_mut().formula.var_names.clone();
+        for (id, var_name) in var_names.into_iter().enumerate() {
+          write!(
+            f,
+            " {var_name} = {}",
+            self.0.borrow_mut().get_var(Variable { id })
+          )?;
+        }
+        writeln!(f)
+      }
+    }
+
+    Displayer(RefCell::new(self))
+  }
+}
+
+/// Struct for holding and incrementally updating variables.
+#[derive(Debug)]
+struct AssignedVars {
+  assignments: VecMap<Vec<Term>>,
+  var_cache: VecMap<CompactString>,
+}
+
+impl AssignedVars {
+  fn get_var(&mut self, var: Variable) -> &str {
+    if self.var_cache.contains_key(var.id) {
+      return &self.var_cache[var.id];
+    }
+    let mut res = CompactString::default();
+    for term in self.assignments.remove(var.id).unwrap_or_default() {
+      match term {
+        Term::Terminal(Terminal(c)) => res.push(c),
+        Term::Variable(var) => res += self.get_var(var),
+      }
+    }
+    self.var_cache.insert(var.id, res);
+    &self.var_cache[var.id]
   }
 }
