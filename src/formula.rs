@@ -114,7 +114,7 @@ pub fn display_word<'a, D: fmt::Display>(
       for x in self.0.clone() {
         match x {
           Term::Terminal(Terminal(t)) => write!(f, "{t}")?,
-          Term::Variable(v) => write!(f, "{}", (self.1)(&v))?,
+          Term::Variable(v) => write!(f, "{}", (self.1)(v))?,
         }
       }
       Ok(())
@@ -129,7 +129,7 @@ impl Cnf {
     get_var_name: impl Fn(&Variable) -> D + 'a,
   ) -> impl fmt::Display + 'a {
     struct Displayer<'a, F>(&'a Cnf, F);
-    impl<'a, F, D> fmt::Display for Displayer<'a, F>
+    impl<F, D> fmt::Display for Displayer<'_, F>
     where
       F: Fn(&Variable) -> D,
       D: fmt::Display,
