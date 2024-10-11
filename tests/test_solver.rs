@@ -4,7 +4,7 @@ use smt_str_solver::*;
 #[test]
 fn test_simple_equations() {
   let formula_1 = Formula::new(Cnf(VecList::new()), Vec::new());
-  solve_no_timeout(formula_1).assert_sat();
+  solve_no_watch(formula_1).assert_sat();
   let formula_2 = Formula::new(
     Cnf(
       [Clause {
@@ -18,7 +18,7 @@ fn test_simple_equations() {
     ),
     vec!["X".into(), "Y".into()],
   );
-  solve_no_timeout(formula_2).assert_sat();
+  solve_no_watch(formula_2).assert_sat();
   let formula_3 = Formula::new(
     Cnf(
       [Clause {
@@ -32,5 +32,5 @@ fn test_simple_equations() {
     ),
     Vec::new(),
   );
-  solve_no_timeout(formula_3).assert_unsat();
+  solve_no_watch(formula_3).assert_unsat();
 }

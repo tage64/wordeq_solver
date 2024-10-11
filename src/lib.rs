@@ -1,15 +1,15 @@
 mod formula;
-use std::cell::RefCell;
+mod node_watcher;
 pub mod vec_list;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::ops::ControlFlow;
-use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
 use bit_set::BitSet;
 use compact_str::CompactString;
 pub use formula::*;
+pub use node_watcher::*;
 use vec_list::ListPtr;
 use vec_map::VecMap;
 
@@ -33,25 +33,13 @@ pub use Solution::*;
 /// Takes in a closure (node_watcher) which may cancel the search at any node by returning
 /// `ControlFlow::Break(_)`. It will be called at every new node, right before the fix point
 /// function.
-pub fn solve(formula: Formula, node_watcher: impl FnMut() -> ControlFlow<()>) -> Solution {
+pub fn solve<W: NodeWatcher>(formula: Formula, node_watcher: W) -> (Solution, W) {
   Solver::new(formula.cnf, &formula.var_names).solve(formula.var_names, node_watcher)
 }
 
-/// Solve with a timeout.
-pub fn solve_with_timeout(formula: Formula, timeout: Duration) -> Solution {
-  let start_timestamp = Instant::now();
-  solve(formula, || {
-    if start_timestamp.elapsed() > timeout {
-      ControlFlow::Break(())
-    } else {
-      ControlFlow::Continue(())
-    }
-  })
-}
-
-/// Solves the formula with no timeout.
-pub fn solve_no_timeout(formula: Formula) -> Solution {
-  solve(formula, || ControlFlow::Continue(()))
+/// Simple solve function which doesn't use a watcher.
+pub fn solve_no_watch(formula: Formula) -> Solution {
+  solve(formula, dummy_watcher()).0
 }
 
 /// A result returned from the simplify_clause function.
@@ -308,18 +296,18 @@ impl Solver {
   /// function.
   ///
   /// The `var_names` argument is moved into the `SatResult` when finished.
-  fn solve(
+  fn solve<W: NodeWatcher>(
     mut self,
     var_names: Vec<CompactString>,
-    mut node_watcher: impl FnMut() -> ControlFlow<()>,
-  ) -> Solution {
+    mut node_watcher: W,
+  ) -> (Solution, W) {
     let original_formula = self.formula.clone();
     let restart_node = self.clone();
     while self.max_depth <= MAX_DEPTH {
       let mut unknown_branches = 0;
       loop {
-        if node_watcher().is_break() {
-          return Cancelled;
+        if node_watcher.visit_node().is_break() {
+          return (Cancelled, node_watcher);
         }
         #[cfg(feature = "trace_logging")]
         log::trace!(
@@ -360,10 +348,13 @@ impl Solver {
           // There are no splits so we've reached SAT!
           #[cfg(feature = "trace_logging")]
           log::trace!("SAT");
-          return Sat(SatResult::new(
-            self,
-            Formula::new(original_formula, var_names),
-          ));
+          return (
+            Sat(SatResult::new(
+              self,
+              Formula::new(original_formula, var_names),
+            )),
+            node_watcher,
+          );
         };
         self.splits_for_clause.remove(clause_ptr.to_usize());
         #[cfg(feature = "trace_logging")]
@@ -382,14 +373,14 @@ impl Solver {
         }
       }
       if unknown_branches == 0 {
-        return Unsat;
+        return (Unsat, node_watcher);
       }
       self.max_depth += MAX_DEPTH_STEP;
       #[cfg(feature = "trace_logging")]
       log::trace!("Increasing max depth to {}", self.max_depth);
       self = restart_node.clone();
     }
-    return Unknown;
+    (Unknown, node_watcher)
   }
 
   /// Take the next branch at the parent, grand parent or older ancestor. Returns Err(()) if no more

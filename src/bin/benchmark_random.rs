@@ -59,6 +59,8 @@ fn main() {
       |x| char::is_ascii_uppercase(&x),
     );
     log::info!("Test iteration {test_i}: {formula}");
-    solve_with_timeout(formula, Duration::from_secs(32)).assert_sat();
+    solve(formula, Timeout::from_now(Duration::from_secs(32)))
+      .0
+      .assert_sat();
   }
 }
