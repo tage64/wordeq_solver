@@ -8,8 +8,10 @@ use std::fmt;
 use arrayvec::ArrayVec;
 use bit_set::BitSet;
 use compact_str::CompactString;
+use derive_more::Display;
 pub use formula::*;
 pub use node_watcher::*;
+use serde::{Deserialize, Serialize};
 use vec_list::ListPtr;
 use vec_map::VecMap;
 
@@ -17,7 +19,7 @@ const MAX_DEPTH: usize = 16;
 const INITIAL_MAX_DEPTH: usize = 4;
 const MAX_DEPTH_STEP: usize = 2;
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Display, Serialize, Deserialize)]
 pub enum Solution {
   #[display("SAT")]
   Sat(SatResult),
@@ -835,7 +837,7 @@ impl Solution {
 
 /// A struct returned for a satisfying solution from which it is possible to get the values for all
 /// variables.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SatResult {
   formula: Formula,
   assignments: AssignedVars,
@@ -924,7 +926,7 @@ impl SatResult {
 }
 
 /// Struct for holding and incrementally updating variables.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AssignedVars {
   assignments: VecMap<Vec<Term>>,
   var_cache: VecMap<CompactString>,

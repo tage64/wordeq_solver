@@ -1,10 +1,21 @@
+use std::fs::File;
+use std::path::Path;
 use std::time::Duration;
 
 use flexi_logger::Logger;
 use rand::prelude::*;
 use smt_str_solver::*;
 
-fn main() {
+type Results = Vec<(Formula, Solution, NodeStats)>;
+
+fn main() -> anyhow::Result<()> {
+  run_benchmark(random_formulae(), None)
+}
+
+fn run_benchmark(
+  formulae: impl ExactSizeIterator<Item = Formula>,
+  results_file: Option<&Path>,
+) -> anyhow::Result<()> {
   #[allow(unused_variables, unused_mut)]
   let mut logger = Logger::try_with_env_or_str("info")
     .unwrap()
@@ -12,13 +23,35 @@ fn main() {
     .log_to_stdout()
     .start()
     .unwrap();
+  let mut results: Results = Vec::new();
+  for (i, formula) in formulae.enumerate() {
+    log::info!("Formula {}: {formula}", i + 1);
+    let (mut solution, stats) = solve(
+      formula.clone(),
+      CollectNodeStats::from_now(Duration::from_secs(32)),
+    );
+    let stats = stats.finished();
+    log::info!("  {stats}");
+    if let Sat(x) = &mut solution {
+      x.assert_correct();
+    }
+    results.push((formula, solution, stats));
+  }
+  if let Some(path) = results_file {
+    bincode::serialize_into(File::create(path)?, &results)?;
+  }
+  Ok(())
+}
+
+fn summerize_results(mut results: Results) {
+  todo!()
+}
+
+fn random_formulae() -> impl ExactSizeIterator<Item = Formula> {
   let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42);
   let var_names: [&str; 8] = ["X", "Y", "Z", "U", "V", "W", "P", "Q"];
   // The 286th iteration takes a lot of time.
-  for test_i in 0..285 {
-    //if test_i == 285 {
-    //  logger.parse_new_spec("trace").unwrap();
-    //}
+  (0..285).map(move |_| {
     let n_clauses = rng.gen_range(0..=3);
     let mut lhss = Vec::<String>::with_capacity(n_clauses);
     let mut rhss = Vec::<String>::with_capacity(n_clauses);
@@ -50,17 +83,13 @@ fn main() {
         }
       }
     }
-    let formula = Formula::from_strs(
+    Formula::from_strs(
       &lhss
         .iter()
         .zip(rhss.iter())
         .map(|(lhs, rhs)| (lhs.as_str(), rhs.as_str()))
         .collect::<Vec<_>>(),
       |x| char::is_ascii_uppercase(&x),
-    );
-    log::info!("Test iteration {test_i}: {formula}");
-    solve(formula, Timeout::from_now(Duration::from_secs(32)))
-      .0
-      .assert_sat();
-  }
+    )
+  })
 }

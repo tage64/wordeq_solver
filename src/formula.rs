@@ -2,50 +2,51 @@ use std::collections::HashMap;
 use std::fmt;
 
 use compact_str::CompactString;
+use serde::{Deserialize, Serialize};
 
 use crate::vec_list::VecList;
 
 /// A terminal (a character).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Terminal(pub char);
 
 /// A variable with a unique id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Variable {
   pub id: usize,
 }
 
 /// A terminal or variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Term {
   Terminal(Terminal),
   Variable(Variable),
 }
 
 /// A word is a list of terms.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Word(pub VecList<Term>);
 
 /// An equality constraint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Equation {
   pub lhs: Word,
   pub rhs: Word,
 }
 
 /// A clause in a conjunction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clause {
   /// This could be extended to be disjunction and negations but it is only an equation for now.
   pub equation: Equation,
 }
 
 /// A list of clauses.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cnf(pub VecList<Clause>);
 
 /// A formula.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Formula {
   pub(crate) cnf: Cnf,
   pub(crate) var_names: Vec<CompactString>,

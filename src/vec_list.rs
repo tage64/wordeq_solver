@@ -3,9 +3,10 @@
 use std::mem;
 
 use nonmax::NonMaxUsize;
+use serde::{Deserialize, Serialize};
 
 /// A pointer to an element in a list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPtr(NonMaxUsize);
 
 /// Assert that an option of a pointer has size of usize.
@@ -25,7 +26,7 @@ impl ListPtr {
 }
 
 /// An occupied entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OccupiedEntry<T> {
   item: T,
   prev: Option<ListPtr>,
@@ -33,7 +34,7 @@ struct OccupiedEntry<T> {
 }
 
 /// An entry in a list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum Entry<T> {
   Occupied(OccupiedEntry<T>),
   Vacant {
@@ -42,7 +43,7 @@ enum Entry<T> {
   },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VecList<T> {
   entries: Vec<Entry<T>>,
   head: Option<ListPtr>,
