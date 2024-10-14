@@ -3,10 +3,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use flexi_logger::Logger;
+use humantime::format_duration;
 use rand::prelude::*;
 use smt_str_solver::*;
 
-type Results = Vec<(Formula, Solution, NodeStats)>;
+type SolverResult = (Formula, Solution, NodeStats);
 
 fn main() -> anyhow::Result<()> {
   run_benchmark(random_formulae(), None)
@@ -23,7 +24,7 @@ fn run_benchmark(
     .log_to_stdout()
     .start()
     .unwrap();
-  let mut results: Results = Vec::new();
+  let mut results: Vec<SolverResult> = Vec::new();
   for (i, formula) in formulae.enumerate() {
     log::info!("Formula {}: {formula}", i + 1);
     let (mut solution, stats) = solve(
@@ -43,8 +44,26 @@ fn run_benchmark(
   Ok(())
 }
 
-fn summerize_results(mut results: Results) {
-  todo!()
+fn summerize_results(results: &[SolverResult]) {
+  // All results which are not cancelled, that is SAT or UNSAT.
+  let mut completed_results = results
+    .iter()
+    .filter_map(|x| match x.1 {
+      Sat(_) | Unsat => Some(x),
+      Cancelled => None,
+      Unknown => unreachable!(),
+    })
+    .collect::<Vec<&SolverResult>>();
+  println!(
+    "{}/{} ({:.1} %) formulae was solved without a timeout.",
+    completed_results.len(),
+    results.len(),
+    100.0 * completed_results.len() as f64 / results.len() as f64
+  );
+  let mut table = comfy_table::Table::new()
+    .load_preset(comfy_table::presets::ASCII_FULL_CONDENSED)
+    .set_header(["", "Q1", "Median", "Q3"]);
+  completed_results.sort_unstable_by_key(|(_, _, stats)| stats.search_time);
 }
 
 fn random_formulae() -> impl ExactSizeIterator<Item = Formula> {
@@ -92,4 +111,43 @@ fn random_formulae() -> impl ExactSizeIterator<Item = Formula> {
       |x| char::is_ascii_uppercase(&x),
     )
   })
+}
+
+fn get_percentiles<'a, T>(
+  percentiles: impl IntoIterator<Item = f64> + 'a,
+  items: &'a mut [T],
+  key: impl Fn(&T) -> f64 + 'a,
+) -> impl Iterator<Item = f64> + 'a {
+  assert!(!items.is_empty());
+  items.sort_unstable_by(|x, y| f64::total_cmp(&key(x), &key(y)));
+  percentiles.into_iter().map(move |percentile| {
+    let index = percentile / 100.0 * items.len() as f64;
+    let int_index: usize = index.ceil() as usize;
+    if int_index == 0 {
+      key(&items[0])
+    } else if index.fract() == 0.0 && int_index < items.len() {
+      (key(&items[int_index - 1]) + key(&items[int_index])) / 2.0
+    } else {
+      key(&items[int_index - 1])
+    }
+  })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_percentile() {
+    let mut nums = [4.0, 1.5, 2.0, 1.0];
+    assert_eq!(
+      get_percentiles(
+        [0.0, 20.0, 25.0, 30.0, 50.0, 60.0, 75.0, 80.0, 100.0],
+        &mut nums,
+        |x| *x
+      )
+      .collect::<Vec<_>>(),
+      [1.0, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0, 4.0, 4.0]
+    );
+  }
 }
