@@ -1,11 +1,11 @@
-variables = { "Variables {" ~ ASCII_ALPHA_UPPER* ~ "}" }
-terminals = { "Terminals {" ~ ASCII_ALPHA_LOWER* ~ "}" }
-equation = { "Equation: " ~ ASCII_ALPHA* ~ " = " ~ ASCII_ALPHA* }
+variables = { ASCII_ALPHA_UPPER* }
+terminals = { ASCII_ALPHA_LOWER* }
+vars_or_terminals = { ASCII_ALPHA* }
 file = {
     SOI ~
-    variables ~ NEWLINE ~
-    terminals ~ NEWLINE ~
-    equation ~ NEWLINE ~
-    "SatGlucose(100)" ~
+    "Variables {" ~ variables ~ "}" ~ NEWLINE ~
+    "Terminals {" ~ terminals ~ "}" ~ NEWLINE ~
+    "Equation: " ~ vars_or_terminals ~ " = " ~ vars_or_terminals ~ NEWLINE ~
+    "SatGlucose(100)" ~ NEWLINE? ~
     EOI
 }
