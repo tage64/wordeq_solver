@@ -11,27 +11,24 @@ use smt_str_solver::*;
 type SolverResult = (Formula, Solution, NodeStats);
 
 fn main() -> anyhow::Result<()> {
-  run_benchmark(random_formulae(), None)
-}
-
-fn run_benchmark(
-  formulae: impl ExactSizeIterator<Item = Formula>,
-  results_file: Option<&Path>,
-) -> anyhow::Result<()> {
-  #[allow(unused_variables, unused_mut)]
-  let mut logger = Logger::try_with_env_or_str("info")
+  Logger::try_with_env_or_str("trace")
     .unwrap()
     .format(|f, _, r| write!(f, "{}", r.args()))
     .log_to_stdout()
     .start()
     .unwrap();
+  run_benchmark(random_formulae(1000), Duration::from_secs(16), None)
+}
+
+fn run_benchmark(
+  formulae: impl ExactSizeIterator<Item = Formula>,
+  timeout: Duration,
+  results_file: Option<&Path>,
+) -> anyhow::Result<()> {
   let mut results: Vec<SolverResult> = Vec::new();
   for (i, formula) in formulae.enumerate() {
     log::info!("Formula {}: {formula}", i + 1);
-    let (mut solution, stats) = solve(
-      formula.clone(),
-      CollectNodeStats::from_now(Duration::from_secs(16)),
-    );
+    let (mut solution, stats) = solve(formula.clone(), CollectNodeStats::from_now(timeout));
     let stats = stats.finished();
     log::info!("  {solution}; {stats}");
     if let Sat(x) = &mut solution {
@@ -62,41 +59,43 @@ fn summerize_results(results: &[SolverResult]) {
     results.len(),
     100.0 * completed_results.len() as f64 / results.len() as f64
   );
-  let mut table = comfy_table::Table::new();
-  table
-    .load_preset(comfy_table::presets::ASCII_FULL_CONDENSED)
-    .set_header(["", "Q1", "Median", "Q3"])
-    .add_row(
-      iter::once("Search time".to_string()).chain(
-        get_percentiles(
-          [25.0, 50.0, 75.0],
-          &mut completed_results,
-          |(_, _, stats)| stats.search_time.as_secs_f64(),
-        )
-        .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
-      ),
-    )
-    .add_row(
-      iter::once("Nodes".to_string()).chain(
-        get_percentiles(
-          [25.0, 50.0, 75.0],
-          &mut completed_results,
-          |(_, _, stats)| stats.node_count as f64,
-        )
-        .map(|x| (x as usize).to_string()),
-      ),
-    )
-    .add_row(
-      iter::once("Mean node time".to_string()).chain(
-        get_percentiles(
-          [25.0, 50.0, 75.0],
-          &mut completed_results,
-          |(_, _, stats)| stats.search_time.as_secs_f64() / stats.node_count as f64,
-        )
-        .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
-      ),
-    );
-  println!("{table}");
+  if completed_results.len() > 0 {
+    let mut table = comfy_table::Table::new();
+    table
+      .load_preset(comfy_table::presets::ASCII_FULL_CONDENSED)
+      .set_header(["", "Q1", "Median", "Q3"])
+      .add_row(
+        iter::once("Search time".to_string()).chain(
+          get_percentiles(
+            [25.0, 50.0, 75.0],
+            &mut completed_results,
+            |(_, _, stats)| stats.search_time.as_secs_f64(),
+          )
+          .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
+        ),
+      )
+      .add_row(
+        iter::once("Nodes".to_string()).chain(
+          get_percentiles(
+            [25.0, 50.0, 75.0],
+            &mut completed_results,
+            |(_, _, stats)| stats.node_count as f64,
+          )
+          .map(|x| (x as usize).to_string()),
+        ),
+      )
+      .add_row(
+        iter::once("Mean node time".to_string()).chain(
+          get_percentiles(
+            [25.0, 50.0, 75.0],
+            &mut completed_results,
+            |(_, _, stats)| stats.search_time.as_secs_f64() / stats.node_count as f64,
+          )
+          .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
+        ),
+      );
+    println!("{table}");
+  }
 }
 
 /// Given a list of items, sort those items and  compute a number of percentiles.
@@ -130,11 +129,11 @@ fn get_percentiles<'a, T>(
   })
 }
 
-fn random_formulae() -> impl ExactSizeIterator<Item = Formula> {
+fn random_formulae(n: usize) -> impl ExactSizeIterator<Item = Formula> {
   let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42);
   let var_names: [&str; 8] = ["X", "Y", "Z", "U", "V", "W", "P", "Q"];
   // The 286th iteration takes a lot of time.
-  (0..8).map(move |_| {
+  (0..n).map(move |_| {
     let n_clauses = rng.gen_range(0..=3);
     let mut lhss = Vec::<String>::with_capacity(n_clauses);
     let mut rhss = Vec::<String>::with_capacity(n_clauses);

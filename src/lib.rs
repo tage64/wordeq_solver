@@ -48,6 +48,8 @@ pub fn solve_no_watch(formula: Formula) -> Solution {
 #[derive(Debug, Clone)]
 #[must_use]
 enum SimplificationResult {
+  /// Both LHS and RHS are empty.
+  BothSidesEmpty,
   /// Unit propagation.
   UnitProp(UnitProp),
   /// Split on a variable at the start of LHS or RHS.
@@ -66,8 +68,6 @@ enum UnitProp {
   UnitPropEmptyLhs,
   /// RHS is empty.
   UnitPropEmptyRhs,
-  /// Both LHS and RHS are empty.
-  BothSidesEmpty,
 }
 use UnitProp::*;
 
@@ -105,7 +105,7 @@ impl Branches {
         *x,
         [Term::Terminal(*a), Term::Variable(get_fresh_var(*x))].into(),
       ),
-      (Self::TwoVars(x, y), 0) | (Self::TwoVars(y, x), 1) => (*x, ArrayVec::new()),
+      (Self::TwoVars(x, _), 0) | (Self::TwoVars(_, x), 1) => (*x, ArrayVec::new()),
       (Self::TwoVars(x, y), 2) => (*x, [Term::Variable(*y)].into_iter().collect()),
       (Self::TwoVars(x, y), 3) | (Self::TwoVars(y, x), 4) => (
         *x,
@@ -305,7 +305,7 @@ impl Solver {
     mut node_watcher: W,
   ) -> (Solution, W) {
     let original_formula = self.formula.clone();
-    let restart_node = self.clone();
+    let mut restart_node = self.clone();
     while self.max_depth <= MAX_DEPTH {
       let mut unknown_branches = 0;
       loop {
@@ -340,6 +340,8 @@ impl Solver {
         }
         let depth = self.depth() + 1;
         if depth >= self.max_depth {
+          #[cfg(feature = "trace_logging")]
+          log::trace!("{:2$}Max depth {} reached.", "", self.depth(), self.depth());
           unknown_branches += 1;
           if let Err(()) = self.take_next_branch() {
             break;
@@ -378,10 +380,10 @@ impl Solver {
       if unknown_branches == 0 {
         return (Unsat, node_watcher);
       }
-      self.max_depth += MAX_DEPTH_STEP;
+      restart_node.max_depth += MAX_DEPTH_STEP;
+      self = restart_node.clone();
       #[cfg(feature = "trace_logging")]
       log::trace!("Increasing max depth to {}", self.max_depth);
-      self = restart_node.clone();
     }
     (Unknown, node_watcher)
   }
@@ -439,15 +441,14 @@ impl Solver {
   /// In a loop: Simplify the equations and perform unit propagation. Return Err(()) on unsat.
   fn fix_point(&mut self) -> Result<(), ()> {
     while !self.updated_clauses.is_empty() {
-      let mut unit_propagation = None;
+      let mut unit_propagations = Vec::new();
       while let Some(clause_ptr) = self.updated_clauses.iter().next().map(ListPtr::from_usize) {
         self.updated_clauses.remove(clause_ptr.to_usize());
         match self.simplify_equation(clause_ptr)? {
-          SimplificationResult::UnitProp(x) => {
-            if unit_propagation.is_none() {
-              unit_propagation = Some((clause_ptr, x));
-            }
+          SimplificationResult::BothSidesEmpty => {
+            self.remove_clause(clause_ptr);
           }
+          SimplificationResult::UnitProp(x) => unit_propagations.push((clause_ptr, x)),
           SimplificationResult::Split(branches) => {
             if let Some(prev_clause) = self.splits.insert(branches.clone(), clause_ptr) {
               self.splits_for_clause.remove(prev_clause.to_usize());
@@ -460,13 +461,15 @@ impl Solver {
       }
 
       // Perform unit propagations.
-      if let Some((clause_ptr, unit_prop)) = unit_propagation {
+      for (clause_ptr, unit_prop) in unit_propagations {
+        if self.updated_clauses.contains(clause_ptr.to_usize()) {
+          continue;
+        }
         self.assert_invariants();
         let Clause {
           equation: Equation { lhs, rhs },
         } = self.formula.0.get(clause_ptr);
         match unit_prop {
-          BothSidesEmpty => (),
           UnitPropEmptyLhs => {
             let mut to_be_empty = BitSet::new(); // All variables in RHS.
             for (_, term) in rhs.0.iter() {
@@ -575,7 +578,7 @@ impl Solver {
       let lhs_back = lhs_back_ptr.map(|x| *lhs.0.get(x));
       let rhs_back = rhs_back_ptr.map(|x| *rhs.0.get(x));
       match (lhs_back, rhs_back) {
-        (None, None) => return Ok(UnitProp(BothSidesEmpty)),
+        (None, None) => return Ok(BothSidesEmpty),
         (None, Some(Term::Variable(_))) => {
           if let Term::Terminal(_) = rhs.0.get(rhs.0.head().unwrap()) {
             return Err(());
@@ -629,7 +632,7 @@ impl Solver {
       let lhs_head = lhs_head_ptr.map(|x| *lhs.0.get(x));
       let rhs_head = rhs_head_ptr.map(|x| *rhs.0.get(x));
       match (lhs_head, rhs_head) {
-        (None, None) => return Ok(UnitProp(BothSidesEmpty)),
+        (None, None) => return Ok(BothSidesEmpty),
         (None, Some(Term::Variable(_))) => {
           if let Term::Terminal(_) = rhs.0.get(rhs.0.head().unwrap()) {
             return Err(());
