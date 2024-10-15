@@ -84,12 +84,12 @@ enum Branches {
 }
 
 impl Branches {
-  /// The number of splits (1..=3).
+  /// The number of splits (1..=5).
   fn len(&self) -> usize {
     match self {
       Self::Empty(_) => 1,
       Self::EmptyOrTerminal(_, _) => 2,
-      Self::TwoVars(_, _) => 3,
+      Self::TwoVars(_, _) => 5,
     }
   }
 
@@ -105,8 +105,9 @@ impl Branches {
         *x,
         [Term::Terminal(*a), Term::Variable(get_fresh_var(*x))].into(),
       ),
-      (Self::TwoVars(x, y), 0) => (*x, [Term::Variable(*y)].into_iter().collect()),
-      (Self::TwoVars(x, y), 1) | (Self::TwoVars(y, x), 2) => (
+      (Self::TwoVars(x, y), 0) | (Self::TwoVars(y, x), 1) => (*x, ArrayVec::new()),
+      (Self::TwoVars(x, y), 2) => (*x, [Term::Variable(*y)].into_iter().collect()),
+      (Self::TwoVars(x, y), 3) | (Self::TwoVars(y, x), 4) => (
         *x,
         [Term::Variable(*y), Term::Variable(get_fresh_var(*x))].into(),
       ),
