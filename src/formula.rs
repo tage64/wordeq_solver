@@ -1,3 +1,4 @@
+mod eq_parser;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -96,6 +97,11 @@ impl Formula {
       .map(|c| c.to_string().into())
       .collect();
     Self::new(cnf, var_names)
+  }
+
+  /// Parse a .eq file.
+  pub fn from_eq_file(text: &str) -> anyhow::Result<Self> {
+    eq_parser::EqParser::parse_to_formula(text)
   }
 }
 

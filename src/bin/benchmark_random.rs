@@ -17,12 +17,12 @@ fn main() -> anyhow::Result<()> {
     .log_to_stdout()
     .start()
     .unwrap();
-  run_benchmark(random_formulae(1000), Duration::from_secs(16), None)
+  run_benchmark(random_formulae(1000), Some(Duration::from_secs(16)), None)
 }
 
 fn run_benchmark(
   formulae: impl ExactSizeIterator<Item = Formula>,
-  timeout: Duration,
+  timeout: Option<Duration>,
   results_file: Option<&Path>,
 ) -> anyhow::Result<()> {
   let mut results: Vec<SolverResult> = Vec::new();

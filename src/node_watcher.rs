@@ -67,15 +67,17 @@ pub struct NodeStats {
 /// A watcher which collects statistics about the number of nodes and related information.
 #[derive(Debug)]
 pub struct CollectNodeStats {
-  timeout: Timeout,
+  start: Instant,
+  timeout: Option<Duration>,
   node_count: usize,
 }
 
 impl CollectNodeStats {
   /// Start the timers now.
-  pub fn from_now(timeout: Duration) -> Self {
+  pub fn from_now(timeout: Option<Duration>) -> Self {
     Self {
-      timeout: Timeout::from_now(timeout),
+      start: Instant::now(),
+      timeout,
       node_count: 0,
     }
   }
@@ -84,7 +86,7 @@ impl CollectNodeStats {
   pub fn finished(self) -> NodeStats {
     NodeStats {
       node_count: self.node_count,
-      search_time: self.timeout.start.elapsed(),
+      search_time: self.start.elapsed(),
     }
   }
 }
@@ -92,6 +94,14 @@ impl CollectNodeStats {
 impl NodeWatcher for CollectNodeStats {
   fn visit_node(&mut self) -> ControlFlow<()> {
     self.node_count += 1;
-    self.timeout.visit_node()
+    if let Some(timeout) = self.timeout {
+      if self.start.elapsed() > timeout {
+        ControlFlow::Break(())
+      } else {
+        ControlFlow::Continue(())
+      }
+    } else {
+      ControlFlow::Continue(())
+    }
   }
 }
