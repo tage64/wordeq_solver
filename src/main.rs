@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use clap::Parser;
+use clap::Parser as _;
 use smt_str_solver::*;
 
 #[derive(clap::Parser)]

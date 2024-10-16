@@ -1,30 +1,68 @@
+use std::fs;
 use std::fs::File;
 use std::iter;
 use std::path::Path;
 use std::time::Duration;
 
+use anyhow::Result;
+use clap::Parser as _;
 use flexi_logger::Logger;
 use humantime::format_duration;
 use rand::prelude::*;
 use smt_str_solver::*;
 
+#[derive(clap::Parser)]
+#[command(version, about, author)]
+struct Cli {
+  #[command(subcommand)]
+  subcmd: Subcmd,
+  /// Timeout for each formula in seconds.
+  #[arg(short, long, default_value_t = 16.0)]
+  timeout: f64,
+}
+
+#[derive(clap::Subcommand)]
+enum Subcmd {
+  /// Benchmark small randomly but deterministically generated formulae.
+  Random1 {
+    /// The number of formulae.
+    n: usize,
+  },
+  /// Run benchmark 1.
+  Benchmark1 {
+    /// Run only the n first formulae.
+    n: Option<usize>,
+  },
+}
+
 type SolverResult = (Formula, Solution, NodeStats);
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
   Logger::try_with_env_or_str("trace")
     .unwrap()
     .format(|f, _, r| write!(f, "{}", r.args()))
     .log_to_stdout()
     .start()
     .unwrap();
-  run_benchmark(random_formulae(1000), Some(Duration::from_secs(16)), None)
+  let cli = Cli::parse();
+  let timeout = Some(Duration::from_secs_f64(cli.timeout));
+  match cli.subcmd {
+    Subcmd::Random1 { n } => run_benchmark(random_formulae(n), timeout, None),
+    Subcmd::Benchmark1 { n } => {
+      if let Some(_) = n {
+        todo!()
+      } else {
+        run_benchmark(benchmark_1()?, timeout, None)
+      }
+    }
+  }
 }
 
 fn run_benchmark(
   formulae: impl ExactSizeIterator<Item = Formula>,
   timeout: Option<Duration>,
   results_file: Option<&Path>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
   let mut results: Vec<SolverResult> = Vec::new();
   for (i, formula) in formulae.enumerate() {
     log::info!("Formula {}: {formula}", i + 1);
@@ -50,7 +88,6 @@ fn summerize_results(results: &[SolverResult]) {
     .filter_map(|x| match x.1 {
       Sat(_) | Unsat => Some(x),
       Cancelled => None,
-      Unknown => unreachable!(),
     })
     .collect::<Vec<&SolverResult>>();
   println!(
@@ -174,6 +211,13 @@ fn random_formulae(n: usize) -> impl ExactSizeIterator<Item = Formula> {
       |x| char::is_ascii_uppercase(&x),
     )
   })
+}
+
+fn benchmark_1() -> Result<impl ExactSizeIterator<Item = Formula>> {
+  fs::read_dir("benchmark_1")?
+    .map(|entry| Formula::from_eq_file(&fs::read_to_string(entry?.path())?))
+    .collect::<Result<Vec<_>>>()
+    .map(|x| x.into_iter())
 }
 
 #[cfg(test)]

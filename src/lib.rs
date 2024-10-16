@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use vec_list::ListPtr;
 use vec_map::VecMap;
 
-const MAX_DEPTH: usize = 16;
 const INITIAL_MAX_DEPTH: usize = 4;
 const MAX_DEPTH_STEP: usize = 2;
 
@@ -25,7 +24,6 @@ pub enum Solution {
   Sat(SatResult),
   #[display("UNSAT")]
   Unsat,
-  Unknown,
   Cancelled,
 }
 pub use Solution::*;
@@ -306,7 +304,7 @@ impl Solver {
   ) -> (Solution, W) {
     let original_formula = self.formula.clone();
     let mut restart_node = self.clone();
-    while self.max_depth <= MAX_DEPTH {
+    loop {
       let mut unknown_branches = 0;
       loop {
         if node_watcher.visit_node().is_break() {
@@ -385,7 +383,6 @@ impl Solver {
       #[cfg(feature = "trace_logging")]
       log::trace!("Increasing max depth to {}", self.max_depth);
     }
-    (Unknown, node_watcher)
   }
 
   /// Take the next branch at the parent, grand parent or older ancestor. Returns Err(()) if no more
