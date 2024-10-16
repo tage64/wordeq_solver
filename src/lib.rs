@@ -91,23 +91,44 @@ impl Branches {
     }
   }
 
+  /// Given a branch index, check whether the branch will be a reducing branch or not.
+  fn is_reducing(&self, n: usize, solver: &Solver) -> bool {
+    match (self, n) {
+      (Self::Empty(_), 0)
+      | (Self::EmptyOrTerminal(_, _), 0)
+      | (Self::TwoVars(_, _), 2)
+      | (Self::TwoVars(_, _), 0)
+      | (Self::TwoVars(_, _), 1) => true,
+      (Self::EmptyOrTerminal(x, _), 1) => {
+        solver.var_ptrs[x.id].len() <= 1 && {
+          let (lhs, rhs) = solver.var_ptrs[x.id].values().next().unwrap();
+          lhs.len() + rhs.len() <= 1
+        }
+      }
+      (Self::TwoVars(_, _), 3) | (Self::TwoVars(_, _), 4) => false,
+      _ => unreachable!(),
+    }
+  }
+
   /// Get the nth split as a tuple (var, replacement).
-  fn get(
-    &self,
-    n: usize,
-    get_fresh_var: impl FnOnce(Variable) -> Variable,
-  ) -> (Variable, ArrayVec<Term, 2>) {
+  ///
+  /// `n` the index of the branch.
+  /// `solver` A mutable reference to the solver used to add fresh variables.
+  ///
+  /// Returns a `(variable, assignment)` pair where `variable` is the variable to be
+  /// assigned and `assignment` is the terms to assign to the variable.
+  fn get(&self, n: usize, solver: &mut Solver) -> (Variable, ArrayVec<Term, 2>) {
     match (self, n) {
       (Self::Empty(x), 0) | (Self::EmptyOrTerminal(x, _), 0) => (*x, ArrayVec::new()),
       (Self::EmptyOrTerminal(x, a), 1) => (
         *x,
-        [Term::Terminal(*a), Term::Variable(get_fresh_var(*x))].into(),
+        [Term::Terminal(*a), Term::Variable(solver.add_fresh_var(*x))].into(),
       ),
       (Self::TwoVars(x, _), 0) | (Self::TwoVars(_, x), 1) => (*x, ArrayVec::new()),
       (Self::TwoVars(x, y), 2) => (*x, [Term::Variable(*y)].into_iter().collect()),
       (Self::TwoVars(x, y), 3) | (Self::TwoVars(y, x), 4) => (
         *x,
-        [Term::Variable(*y), Term::Variable(get_fresh_var(*x))].into(),
+        [Term::Variable(*y), Term::Variable(solver.add_fresh_var(*x))].into(),
       ),
       _ => unreachable!(),
     }
@@ -139,18 +160,24 @@ struct Solver {
   splits_for_clause: VecMap<Branches>,
   /// The parent of this node in the search tree together with the other branches to try under that
   /// parent.
-  parent: Option<ParentNode>,
+  parent: Option<Edge>,
   max_depth: usize,
 }
 
 #[derive(Debug, Clone)]
-struct ParentNode {
-  solver: Box<Solver>,
-  /// The branches under this node.
+struct Edge {
+  parent: Box<Solver>,
+  /// The remaining branches under the parent.
   branches: Branches,
   /// The current branch index.
   branch_idx: usize,
-  /// The number of parents above the current node. This field will never be 0.
+  /// Whether the assignment leading to this node certainly reduced the formula.
+  ///
+  /// The formula is reduced when a variable is set to empty, set to be equal to another variable,
+  /// or set to a terminal followed by a frech variable and the substituted variable occurres only
+  /// once.
+  reducing: bool,
+  /// The number of reducing edges to the root (including this edge).
   depth: usize,
 }
 
@@ -280,10 +307,14 @@ impl Solver {
     // Check that the depth is correct.
     let mut solver = self;
     let mut depth = solver.depth();
-    while let Some(parent_node) = solver.parent.as_ref() {
-      solver = &*parent_node.solver;
-      assert_eq!(depth, solver.depth() + 1);
-      depth = solver.depth();
+    while let Some(edge) = solver.parent.as_ref() {
+      solver = &*edge.parent;
+      if edge.reducing {
+        assert_eq!(depth, solver.depth());
+      } else {
+        assert_eq!(depth, solver.depth() + 1);
+        depth = solver.depth();
+      }
     }
     assert_eq!(depth, 0);
   }
@@ -305,7 +336,7 @@ impl Solver {
     let original_formula = self.formula.clone();
     let mut restart_node = self.clone();
     loop {
-      let mut unknown_branches = 0;
+      let mut unknown_branch = false; // Set this to true if `self.max_depth` is reached.
       loop {
         if node_watcher.visit_node().is_break() {
           return (Cancelled, node_watcher);
@@ -331,18 +362,9 @@ impl Solver {
           // This branch is unsat.
           #[cfg(feature = "trace_logging")]
           log::trace!("{:1$}Unsatisfiable branch;", "", self.depth());
-          if let Err(()) = self.take_next_branch() {
-            break;
-          }
-          continue;
-        }
-        let depth = self.depth() + 1;
-        if depth >= self.max_depth {
-          #[cfg(feature = "trace_logging")]
-          log::trace!("{:2$}Max depth {} reached.", "", self.depth(), self.depth());
-          unknown_branches += 1;
-          if let Err(()) = self.take_next_branch() {
-            break;
+          match self.take_next_branch() {
+            Err(()) => break,
+            Ok(x) => unknown_branch |= x,
           }
           continue;
         }
@@ -362,20 +384,23 @@ impl Solver {
         self.splits_for_clause.remove(clause_ptr.to_usize());
         #[cfg(feature = "trace_logging")]
         log::trace!("{:1$}New split;", "", self.depth());
-        let grand_parent = self.parent.take();
+        let depth = self.depth();
+        let parent_edge = self.parent.take();
         let mut parent = self.clone();
-        parent.parent = grand_parent;
-        self.parent = Some(ParentNode {
-          solver: Box::new(parent),
+        parent.parent = parent_edge;
+        self.parent = Some(Edge {
+          parent: Box::new(parent),
           branches,
           branch_idx: 0,
           depth,
+          reducing: true, // Not really true, but we have not taken any branch yet.
         });
-        if let Err(()) = self.take_next_branch() {
-          break;
+        match self.take_next_branch() {
+          Err(()) => break,
+          Ok(x) => unknown_branch |= x,
         }
       }
-      if unknown_branches == 0 {
+      if !unknown_branch {
         return (Unsat, node_watcher);
       }
       restart_node.max_depth += MAX_DEPTH_STEP;
@@ -386,31 +411,50 @@ impl Solver {
   }
 
   /// Take the next branch at the parent, grand parent or older ancestor. Returns Err(()) if no more
-  /// branches exist.
-  fn take_next_branch(&mut self) -> Result<(), ()> {
+  /// branches exist. Returns `Ok(true)` if we reached max depth somewhere so there is an unknown
+  /// branch.
+  fn take_next_branch(&mut self) -> Result<bool, ()> {
+    let mut unknown_branch = false; // Set this to true if we ever reach self.max_depth.
     loop {
-      let Some(mut parent) = self.parent.take() else {
+      let Some(mut edge) = self.parent.take() else {
         #[cfg(feature = "trace_logging")]
         log::trace!("UNSAT");
         return Err(());
       };
-      if parent.branch_idx < parent.branches.len() {
+      if edge.branch_idx < edge.branches.len() {
         #[cfg(feature = "trace_logging")]
         log::trace!(
           "{:2$}There are {} branches here.",
           "",
-          parent.branches.len() - parent.branch_idx,
-          parent.depth - 1,
+          edge.branches.len() - edge.branch_idx,
+          edge.depth,
         );
+        let branch_idx = edge.branch_idx;
+        edge.branch_idx += 1;
+        edge.reducing = edge.branches.is_reducing(branch_idx, &edge.parent);
+        edge.depth = if edge.reducing {
+          edge.parent.depth()
+        } else {
+          edge.parent.depth() + 1
+        };
+        if edge.depth >= self.max_depth {
+          #[cfg(feature = "trace_logging")]
+          log::trace!(
+            "{:2$}Max depth {} reached with this non reducing branch.",
+            "",
+            self.max_depth,
+            edge.depth,
+          );
+          unknown_branch = true;
+          self.parent = Some(edge);
+          continue;
+        }
         // restor self to parent.
-        let grand_parent = parent.solver.parent.take();
-        *self = (*parent.solver).clone();
-        parent.solver.parent = grand_parent;
-        let (branch_var, replacement) = parent
-          .branches
-          .get(parent.branch_idx, |x| self.add_fresh_var(x));
-        parent.branch_idx += 1;
-        self.parent = Some(parent);
+        let parent_edge = edge.parent.parent.take();
+        *self = (*edge.parent).clone();
+        edge.parent.parent = parent_edge;
+        let (branch_var, replacement) = edge.branches.get(branch_idx, self);
+        self.parent = Some(edge);
         // make the split.
         #[cfg(feature = "trace_logging")]
         log::trace!(
@@ -418,19 +462,19 @@ impl Solver {
           "",
           &self.var_names[branch_var.id],
           display_word(replacement.iter(), |x| &self.var_names[x.id]),
-          self.depth() - 1,
+          self.depth(),
         );
         self.fix_var(branch_var, replacement);
-        break Ok(());
+        break Ok(unknown_branch);
       }
       // There are no more branches so let's backtrack to the grand parent.
-      *self = *parent.solver;
+      *self = *edge.parent;
       #[cfg(feature = "trace_logging")]
       log::trace!(
         "{:2$}Back tracking to: {}",
         "",
         self.formula.display(|x| &self.var_names[x.id]),
-        self.depth(),
+        edge.depth,
       );
     }
   }
@@ -807,7 +851,7 @@ impl Solver {
     new_var
   }
 
-  /// Get the current depth in the tree.
+  /// Get the number of reducing edges from the root to this node.
   fn depth(&self) -> usize {
     self.parent.as_ref().map_or(0, |x| x.depth)
   }

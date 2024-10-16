@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use clap::Parser as _;
+use flexi_logger::Logger;
 use smt_str_solver::*;
 
 #[derive(clap::Parser)]
@@ -16,10 +17,20 @@ struct Cli {
   /// Try for at most this number of seconds.
   #[arg(short, long)]
   timeout: Option<f64>,
+  /// Be super verbose and print lots of trace debug info.
+  #[arg(short, long)]
+  debug: bool,
 }
 
 fn main() -> Result<()> {
   let cli = Cli::parse();
+  let log_level = if cli.debug { "trace" } else { "info" };
+  Logger::try_with_env_or_str(log_level)
+    .unwrap()
+    .format(|f, _, r| write!(f, "{}", r.args()))
+    .log_to_stdout()
+    .start()
+    .unwrap();
   let formula = if let Some(eq_file) = cli.eq_file {
     Formula::from_eq_file(&fs::read_to_string(eq_file)?)?
   } else {
