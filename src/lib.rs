@@ -2,8 +2,9 @@ mod formula;
 mod node_watcher;
 pub mod vec_list;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::rc::Rc;
 
 use arrayvec::ArrayVec;
 use bit_set::BitSet;
@@ -144,6 +145,9 @@ struct Solver {
   no_vars: usize,
   /// assignments[x] = the value for variable with id x.
   assignments: VecMap<Vec<Term>>,
+  empty_vars: BitSet,
+  set_empty_vars: BitSet,
+  unsat_empty_vars: Rc<RefCell<HashSet<BitSet>>>,
   #[cfg(feature = "trace_logging")]
   /// var_names[x] = the name for variable with id x.
   var_names: Vec<CompactString>,
@@ -216,6 +220,9 @@ impl Solver {
       #[cfg(feature = "trace_logging")]
       var_names: var_names.clone(),
       assignments: VecMap::new(),
+      empty_vars: BitSet::new(),
+      set_empty_vars: BitSet::new(),
+      unsat_empty_vars: Rc::new(RefCell::new(HashSet::new())),
       var_ptrs,
       updated_clauses,
       splits: BTreeMap::new(),
@@ -317,6 +324,14 @@ impl Solver {
       }
     }
     assert_eq!(depth, 0);
+    // Assert that empty vars is correct.
+    for var_id in 0..self.no_vars {
+      assert_eq!(
+        self.empty_vars.contains(var_id),
+        self.assignments.get(var_id).map_or(false, |x| x.is_empty())
+      );
+    }
+    assert!(self.set_empty_vars.is_subset(&self.empty_vars));
   }
   #[cfg(not(debug_assertions))]
   fn assert_invariants(&self) {}
@@ -362,6 +377,10 @@ impl Solver {
           // This branch is unsat.
           #[cfg(feature = "trace_logging")]
           log::trace!("{:1$}Unsatisfiable branch;", "", self.depth());
+          self
+            .unsat_empty_vars
+            .borrow_mut()
+            .insert(self.set_empty_vars.clone());
           match self.take_next_branch() {
             Err(()) => break,
             Ok(x) => unknown_branch |= x,
@@ -464,10 +483,34 @@ impl Solver {
           display_word(replacement.iter(), |x| &self.var_names[x.id]),
           self.depth(),
         );
+        if replacement.is_empty() {
+          if self
+            .unsat_empty_vars
+            .borrow()
+            .contains(&self.set_empty_vars)
+          {
+            continue;
+          }
+          self.set_empty_vars.insert(branch_var.id);
+          if self
+            .unsat_empty_vars
+            .borrow()
+            .contains(&self.set_empty_vars)
+          {
+            continue;
+          }
+        } else {
+          self.set_empty_vars = BitSet::new();
+          self.unsat_empty_vars = Rc::new(RefCell::new(HashSet::new()));
+        }
         self.fix_var(branch_var, replacement);
         break Ok(unknown_branch);
       }
       // There are no more branches so let's backtrack to the grand parent.
+      self
+        .unsat_empty_vars
+        .borrow_mut()
+        .insert(self.set_empty_vars.clone());
       *self = *edge.parent;
       #[cfg(feature = "trace_logging")]
       log::trace!(
@@ -835,7 +878,11 @@ impl Solver {
       }
     }
     self.var_ptrs.remove(var.id);
-    self.assignments.insert(var.id, val.into_iter().collect());
+    let val = val.into_iter().collect::<Vec<_>>();
+    if val.is_empty() {
+      self.empty_vars.insert(var.id);
+    }
+    self.assignments.insert(var.id, val);
   }
 
   /// Add a fresh variable and increment self.no_vars.

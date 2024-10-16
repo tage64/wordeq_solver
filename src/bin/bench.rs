@@ -126,10 +126,15 @@ fn run_benchmark(
 
 fn summerize_results(results: &[SolverResult]) {
   // All results which are not cancelled, that is SAT or UNSAT.
+  let mut n_sat = 0;
   let mut completed_results = results
     .iter()
     .filter_map(|x| match x.1 {
-      Sat(_) | Unsat => Some(x),
+      Sat(_) => {
+        n_sat += 1;
+        Some(x)
+      }
+      Unsat => Some(x),
       Cancelled => None,
     })
     .collect::<Vec<&SolverResult>>();
@@ -138,6 +143,10 @@ fn summerize_results(results: &[SolverResult]) {
     completed_results.len(),
     results.len(),
     100.0 * completed_results.len() as f64 / results.len() as f64
+  );
+  println!(
+    "{n_sat} satisfiable and {} unsatisfiable formulae.",
+    completed_results.len() - n_sat
   );
   if completed_results.len() > 0 {
     let mut table = comfy_table::Table::new();
