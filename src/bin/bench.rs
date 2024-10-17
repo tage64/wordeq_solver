@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use clap::Parser as _;
 use flexi_logger::Logger;
-use humantime::format_duration;
 use rand::prelude::*;
 use smt_str_solver::*;
 

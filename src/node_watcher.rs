@@ -2,8 +2,9 @@ use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
 use derive_more::Display;
-use humantime::format_duration;
 use serde::{Deserialize, Serialize};
+
+use crate::format_duration;
 
 pub trait NodeWatcher {
   /// This method should be called at each node. If ite returns `ControlFlow::Break(())`, the

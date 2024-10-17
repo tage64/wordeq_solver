@@ -17,7 +17,6 @@ comfy-table = "7.1.1"
 compact_str = { version = "0.8.0", features = ["serde"] }
 derive_more = { version = "1.0.0", features = ["display"] }
 flexi_logger = { version = "0.29.2", default-features = false }
-humantime = "2.1.0"
 log = "0.4.22"
 nonmax = { version = "0.5.5", features = ["serde"] }
 pest = "2.7.14"

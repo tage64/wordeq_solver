@@ -1,3 +1,4 @@
+mod format_duration;
 mod formula;
 mod node_watcher;
 pub mod vec_list;
@@ -9,6 +10,7 @@ use arrayvec::ArrayVec;
 use bit_set::BitSet;
 use compact_str::CompactString;
 use derive_more::Display;
+pub use format_duration::format_duration;
 pub use formula::*;
 pub use node_watcher::*;
 use serde::{Deserialize, Serialize};
