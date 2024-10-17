@@ -87,7 +87,7 @@ impl Branches {
     match self {
       Self::Empty(_) => 1,
       Self::EmptyOrTerminal(_, _) => 2,
-      Self::TwoVars(_, _) => 5,
+      Self::TwoVars(_, _) => 4,
     }
   }
 
@@ -96,7 +96,6 @@ impl Branches {
     match (self, n) {
       (Self::Empty(_), 0)
       | (Self::EmptyOrTerminal(_, _), 0)
-      | (Self::TwoVars(_, _), 2)
       | (Self::TwoVars(_, _), 0)
       | (Self::TwoVars(_, _), 1) => true,
       (Self::EmptyOrTerminal(x, _), 1) => {
@@ -105,7 +104,7 @@ impl Branches {
           lhs.len() + rhs.len() <= 1
         }
       }
-      (Self::TwoVars(_, _), 3) | (Self::TwoVars(_, _), 4) => false,
+      (Self::TwoVars(_, _), 2) | (Self::TwoVars(_, _), 3) => false,
       _ => unreachable!(),
     }
   }
@@ -125,8 +124,7 @@ impl Branches {
         [Term::Terminal(*a), Term::Variable(solver.add_fresh_var(*x))].into(),
       ),
       (Self::TwoVars(x, _), 0) | (Self::TwoVars(_, x), 1) => (*x, ArrayVec::new()),
-      (Self::TwoVars(x, y), 2) => (*x, [Term::Variable(*y)].into_iter().collect()),
-      (Self::TwoVars(x, y), 3) | (Self::TwoVars(y, x), 4) => (
+      (Self::TwoVars(x, y), 2) | (Self::TwoVars(y, x), 3) => (
         *x,
         [Term::Variable(*y), Term::Variable(solver.add_fresh_var(*x))].into(),
       ),
