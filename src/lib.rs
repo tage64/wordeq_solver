@@ -79,8 +79,12 @@ enum Branches {
   Empty(Variable),
   /// One variable equal to the empty string or a terminal followed by a fresh variable.
   EmptyOrTerminal(Variable, Terminal),
-  /// Two variables which might be equal or one might be a prefix of the other.
-  TwoVars(Variable, Variable),
+  /// Two variables from LHS and RHS respectively.
+  ///
+  /// The third argument is a bool which is true iff we try to set RHS to be empty before LHS is
+  /// empty and RHS is set to be a prefix of LHS before LHS is a prefix of RHS. This decition is
+  /// made in the first call to `self.get()`, before that it may be anything.
+  TwoVars(Variable, Variable, bool),
 }
 
 impl Branches {
@@ -89,7 +93,7 @@ impl Branches {
     match self {
       Self::Empty(_) => 1,
       Self::EmptyOrTerminal(_, _) => 2,
-      Self::TwoVars(_, _) => 4,
+      Self::TwoVars(_, _, _) => 4,
     }
   }
 
@@ -98,15 +102,15 @@ impl Branches {
     match (self, n) {
       (Self::Empty(_), 0)
       | (Self::EmptyOrTerminal(_, _), 0)
-      | (Self::TwoVars(_, _), 0)
-      | (Self::TwoVars(_, _), 1) => true,
+      | (Self::TwoVars(_, _, _), 0)
+      | (Self::TwoVars(_, _, _), 1) => true,
       (Self::EmptyOrTerminal(x, _), 1) => {
         solver.var_ptrs[x.id].len() <= 1 && {
           let (lhs, rhs) = solver.var_ptrs[x.id].values().next().unwrap();
           lhs.len() + rhs.len() <= 1
         }
       }
-      (Self::TwoVars(_, _), 2) | (Self::TwoVars(_, _), 3) => false,
+      (Self::TwoVars(_, _, _), 2) | (Self::TwoVars(_, _, _), 3) => false,
       _ => unreachable!(),
     }
   }
@@ -118,15 +122,47 @@ impl Branches {
   ///
   /// Returns a `(variable, assignment)` pair where `variable` is the variable to be
   /// assigned and `assignment` is the terms to assign to the variable.
-  fn get(&self, n: usize, solver: &mut Solver) -> (Variable, ArrayVec<Term, 2>) {
+  fn get(&mut self, n: usize, solver: &mut Solver) -> (Variable, ArrayVec<Term, 2>) {
     match (self, n) {
       (Self::Empty(x), 0) | (Self::EmptyOrTerminal(x, _), 0) => (*x, ArrayVec::new()),
       (Self::EmptyOrTerminal(x, a), 1) => (
         *x,
         [Term::Terminal(*a), Term::Variable(solver.add_fresh_var(*x))].into(),
       ),
-      (Self::TwoVars(x, _), 0) | (Self::TwoVars(_, x), 1) => (*x, ArrayVec::new()),
-      (Self::TwoVars(x, y), 2) | (Self::TwoVars(y, x), 3) => (
+      (Self::TwoVars(x, y, y_first), 0) => {
+        // Check if x or y is most common.
+        let x_diff = solver.var_ptrs[x.id]
+          .iter()
+          .map(|(clause_id, (x_in_lhs, x_in_rhs))| {
+            let Clause {
+              equation: Equation { lhs, rhs },
+            } = solver.formula.0.get(ListPtr::from_usize(clause_id));
+            x_in_lhs.len() as isize - x_in_rhs.len() as isize + rhs.0.len() as isize
+              - lhs.0.len() as isize
+          })
+          .sum::<isize>();
+        let y_diff = solver.var_ptrs[y.id]
+          .iter()
+          .map(|(clause_id, (y_in_lhs, y_in_rhs))| {
+            let Clause {
+              equation: Equation { lhs, rhs },
+            } = solver.formula.0.get(ListPtr::from_usize(clause_id));
+            y_in_rhs.len() as isize - y_in_lhs.len() as isize + lhs.0.len() as isize
+              - rhs.0.len() as isize
+          })
+          .sum::<isize>();
+        *y_first = x_diff < y_diff;
+        if *y_first {
+          (*y, ArrayVec::new())
+        } else {
+          (*x, ArrayVec::new())
+        }
+      }
+      (Self::TwoVars(_, x, false), 1) | (Self::TwoVars(x, _, true), 1) => (*x, ArrayVec::new()),
+      (Self::TwoVars(y, x, false), 2)
+      | (Self::TwoVars(x, y, false), 3)
+      | (Self::TwoVars(x, y, true), 2)
+      | (Self::TwoVars(y, x, true), 3) => (
         *x,
         [Term::Variable(*y), Term::Variable(solver.add_fresh_var(*x))].into(),
       ),
@@ -743,7 +779,7 @@ impl Solver {
             // RHS is a single variable.
             return Ok(UnitProp(UnitPropRhs(y)));
           } else {
-            return Ok(Split(Branches::TwoVars(x, y)));
+            return Ok(Split(Branches::TwoVars(x, y, Default::default())));
           }
         }
       };
