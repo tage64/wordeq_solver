@@ -154,6 +154,7 @@ fn summerize_results(results: &[SolverResult]) {
       .load_preset(comfy_table::presets::ASCII_FULL_CONDENSED)
       .set_header([
         "",
+        "Average",
         "Min",
         "2.5 percentile",
         "Median",
@@ -161,7 +162,19 @@ fn summerize_results(results: &[SolverResult]) {
         "Max",
       ])
       .add_row(
-        iter::once("Search time".to_string()).chain(
+        [
+          "Search time".to_string(),
+          format_duration(
+            completed_results
+              .iter()
+              .map(|x| x.2.search_time)
+              .sum::<Duration>()
+              / completed_results.len() as u32,
+          )
+          .to_string(),
+        ]
+        .into_iter()
+        .chain(
           get_percentiles(percentiles, &mut completed_results, |(_, _, stats)| {
             stats.search_time.as_secs_f64()
           })
@@ -169,7 +182,17 @@ fn summerize_results(results: &[SolverResult]) {
         ),
       )
       .add_row(
-        iter::once("Nodes".to_string()).chain(
+        [
+          "Nodes".to_string(),
+          (completed_results
+            .iter()
+            .map(|x| x.2.node_count)
+            .sum::<usize>()
+            / completed_results.len())
+          .to_string(),
+        ]
+        .into_iter()
+        .chain(
           get_percentiles(percentiles, &mut completed_results, |(_, _, stats)| {
             stats.node_count as f64
           })
@@ -177,7 +200,22 @@ fn summerize_results(results: &[SolverResult]) {
         ),
       )
       .add_row(
-        iter::once("Mean node time".to_string()).chain(
+        [
+          "Mean node time".to_string(),
+          format_duration(Duration::from_secs_f64(
+            completed_results
+              .iter()
+              .map(|x| x.2.search_time.as_secs_f64())
+              .sum::<f64>()
+              / completed_results
+                .iter()
+                .map(|x| x.2.node_count)
+                .sum::<usize>() as f64,
+          ))
+          .to_string(),
+        ]
+        .into_iter()
+        .chain(
           get_percentiles(percentiles, &mut completed_results, |(_, _, stats)| {
             stats.search_time.as_secs_f64() / stats.node_count as f64
           })
