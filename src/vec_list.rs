@@ -49,6 +49,7 @@ pub struct VecList<T> {
   head: Option<ListPtr>,
   back: Option<ListPtr>,
   vacant_head: Option<ListPtr>,
+  len: usize,
 }
 
 impl<T> VecList<T> {
@@ -59,6 +60,7 @@ impl<T> VecList<T> {
       head: None,
       back: None,
       vacant_head: None,
+      len: 0,
     }
   }
 
@@ -69,7 +71,13 @@ impl<T> VecList<T> {
       head: None,
       back: None,
       vacant_head: None,
+      len: 0,
     }
+  }
+
+  /// Get the number of elements in the list.
+  pub fn len(&self) -> usize {
+    self.len
   }
 
   /// Check if the list contains an element at a certain ptr. Note that you might suffer from the
@@ -149,6 +157,7 @@ impl<T> VecList<T> {
     if let Some(head) = self.head {
       self.insert_before(head, item)
     } else {
+      self.len += 1;
       let insert_ptr = self.take_vacant();
       self.entries[insert_ptr.to_usize()] = Entry::Occupied(OccupiedEntry {
         item,
@@ -172,6 +181,7 @@ impl<T> VecList<T> {
 
   /// Insert an element after this, returning a pointer to the new element. (O(1))
   pub fn insert_after(&mut self, this_ptr: ListPtr, item: T) -> ListPtr {
+    self.len += 1;
     let insert_ptr = if let Some(vacant_head) = self.vacant_head {
       let Entry::Vacant { next_vacant } = self.entries[vacant_head.to_usize()] else {
         panic!("Non vacant entry at vacant_head.");
@@ -200,6 +210,7 @@ impl<T> VecList<T> {
 
   /// Insert an element before this, returning a pointer to the new element. (O(1))
   pub fn insert_before(&mut self, this_ptr: ListPtr, item: T) -> ListPtr {
+    self.len += 1;
     let insert_ptr = if let Some(vacant_head) = self.vacant_head {
       let Entry::Vacant { next_vacant } = self.entries[vacant_head.to_usize()] else {
         panic!("Non vacant entry at vacant_head.");
@@ -228,6 +239,7 @@ impl<T> VecList<T> {
 
   /// Remove an element.
   pub fn remove(&mut self, remove_ptr: ListPtr) -> T {
+    self.len -= 1;
     let Entry::Occupied(removed_entry) =
       mem::replace(&mut self.entries[remove_ptr.to_usize()], Entry::Vacant {
         next_vacant: self.vacant_head,
@@ -373,6 +385,7 @@ mod tests {
   }
 
   fn check_lists(list: &VecList<u64>, ptr_list: &Vec<(ListPtr, u64)>) {
+    assert_eq!(list.len(), ptr_list.len());
     // Check forward direction.
     let mut ptr_iter = ptr_list.iter().copied();
     let mut list_iter = list.iter();
