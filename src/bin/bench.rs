@@ -184,12 +184,14 @@ fn summerize_results(results: &[SolverResult]) {
       .add_row(
         [
           "Nodes".to_string(),
-          (completed_results
-            .iter()
-            .map(|x| x.2.node_count)
-            .sum::<usize>()
-            / completed_results.len())
-          .to_string(),
+          format!(
+            "{:.3}",
+            (completed_results
+              .iter()
+              .map(|x| x.2.node_count as f64)
+              .sum::<f64>()
+              / completed_results.len() as f64)
+          ),
         ]
         .into_iter()
         .chain(
