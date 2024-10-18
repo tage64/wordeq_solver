@@ -5,6 +5,8 @@ pub mod vec_list;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::ControlFlow;
+use std::rc::Rc;
 
 use arrayvec::ArrayVec;
 use bit_set::BitSet;
@@ -36,12 +38,30 @@ pub use Solution::*;
 /// `ControlFlow::Break(_)`. It will be called at every new node, right before the fix point
 /// function.
 pub fn solve<W: NodeWatcher>(formula: Formula, node_watcher: W) -> (Solution, W) {
-  Solver::new(formula.cnf, &formula.var_names).solve(formula.var_names, node_watcher)
+  Solver::new(formula.cnf, formula.var_names).solve(node_watcher)
 }
 
 /// Simple solve function which doesn't use a watcher.
 pub fn solve_no_watch(formula: Formula) -> Solution {
   solve(formula, dummy_watcher()).0
+}
+
+/// A reason for backtracking. Either we proved UNSAT or we reached max depth.
+#[derive(Debug, Clone, Copy)]
+enum BacktrackReason {
+  UnsatBranch,
+  ReachedMaxDepth,
+}
+use BacktrackReason::*;
+
+impl BacktrackReason {
+  /// If both self and other are UnsatBranch set self to UnsatBranch else ReachedMaxDepth.
+  fn combine(&mut self, other: BacktrackReason) {
+    *self = match (*self, other) {
+      (ReachedMaxDepth, _) | (_, ReachedMaxDepth) => ReachedMaxDepth,
+      (UnsatBranch, UnsatBranch) => UnsatBranch,
+    };
+  }
 }
 
 /// A result returned from the simplify_clause function.
@@ -175,6 +195,7 @@ impl Branches {
 struct Solver {
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
   formula: Cnf,
+  original_formula: Rc<Formula>,
   /// The number of variables. Maybe sparse, that is, some of the previously used variables might
   /// have been fixed but they still count.
   no_vars: usize,
@@ -194,31 +215,13 @@ struct Solver {
   splits: BTreeMap<Branches, ListPtr>,
   /// splits[c] = the splits for clause c.
   splits_for_clause: VecMap<Branches>,
-  /// The parent of this node in the search tree together with the other branches to try under that
-  /// parent.
-  parent: Option<Edge>,
+  parent: Option<Rc<Solver>>,
+  depth: usize,
   max_depth: usize,
 }
 
-#[derive(Debug, Clone)]
-struct Edge {
-  parent: Box<Solver>,
-  /// The remaining branches under the parent.
-  branches: Branches,
-  /// The current branch index.
-  branch_idx: usize,
-  /// Whether the assignment leading to this node certainly reduced the formula.
-  ///
-  /// The formula is reduced when a variable is set to empty, set to be equal to another variable,
-  /// or set to a terminal followed by a frech variable and the substituted variable occurres only
-  /// once.
-  reducing: bool,
-  /// The number of reducing edges to the root (including this edge).
-  depth: usize,
-}
-
 impl Solver {
-  fn new(formula: Cnf, var_names: &Vec<CompactString>) -> Self {
+  fn new(formula: Cnf, var_names: Vec<CompactString>) -> Self {
     let no_vars = var_names.len();
     let mut var_ptrs = VecMap::with_capacity(no_vars);
     for (clause_ptr, clause) in formula.0.iter() {
@@ -247,16 +250,18 @@ impl Solver {
     }
     let updated_clauses = formula.0.iter().map(|(ptr, _)| ptr.to_usize()).collect();
     Self {
-      formula,
-      no_vars,
       #[cfg(feature = "trace_logging")]
       var_names: var_names.clone(),
+      original_formula: Rc::new(Formula::new(formula.clone(), var_names)),
+      formula,
+      no_vars,
       assignments: VecMap::new(),
       var_ptrs,
       updated_clauses,
       splits: BTreeMap::new(),
       splits_for_clause: VecMap::new(),
       parent: None,
+      depth: 0,
       max_depth: INITIAL_MAX_DEPTH,
     }
   }
@@ -342,17 +347,11 @@ impl Solver {
 
     // Check that the depth is correct.
     let mut solver = self;
-    let mut depth = solver.depth();
-    while let Some(edge) = solver.parent.as_ref() {
-      solver = &*edge.parent;
-      if edge.reducing {
-        assert_eq!(depth, solver.depth());
-      } else {
-        assert_eq!(depth, solver.depth() + 1);
-        depth = solver.depth();
-      }
+    while let Some(parent) = &solver.parent {
+      assert!(parent.depth + 1 == solver.depth || parent.depth == solver.depth);
+      solver = &*parent;
     }
-    assert_eq!(depth, 0);
+    assert_eq!(solver.depth, 0);
   }
   #[cfg(not(debug_assertions))]
   fn assert_invariants(&self) {}
@@ -364,80 +363,13 @@ impl Solver {
   /// function.
   ///
   /// The `var_names` argument is moved into the `SatResult` when finished.
-  fn solve<W: NodeWatcher>(
-    mut self,
-    var_names: Vec<CompactString>,
-    mut node_watcher: W,
-  ) -> (Solution, W) {
-    let original_formula = self.formula.clone();
+  fn solve<W: NodeWatcher>(mut self, mut node_watcher: W) -> (Solution, W) {
     let mut restart_node = self.clone();
     loop {
-      let mut unknown_branch = false; // Set this to true if `self.max_depth` is reached.
-      loop {
-        if node_watcher.visit_node().is_break() {
-          return (Cancelled, node_watcher);
-        }
-        #[cfg(feature = "trace_logging")]
-        log::trace!(
-          "{:depth$}Solving formula: {}",
-          "",
-          self.formula.display(|x| &self.var_names[x.id]),
-          depth = self.depth()
-        );
-        self.assert_invariants();
-        // Run the fix point function.
-        let fix_point_res = self.fix_point();
-        #[cfg(feature = "trace_logging")]
-        log::trace!(
-          "{:depth$}After fix_point(): {}",
-          "",
-          self.formula.display(|x| &self.var_names[x.id]),
-          depth = self.depth()
-        );
-        if let Err(()) = fix_point_res {
-          // This branch is unsat.
-          #[cfg(feature = "trace_logging")]
-          log::trace!("{:1$}Unsatisfiable branch;", "", self.depth());
-          match self.take_next_branch() {
-            Err(()) => break,
-            Ok(x) => unknown_branch |= x,
-          }
-          continue;
-        }
-        // Perform a split.
-        let Some((branches, clause_ptr)) = self.splits.pop_first() else {
-          // There are no splits so we've reached SAT!
-          #[cfg(feature = "trace_logging")]
-          log::trace!("SAT");
-          return (
-            Sat(SatResult::new(
-              self,
-              Formula::new(original_formula, var_names),
-            )),
-            node_watcher,
-          );
-        };
-        self.splits_for_clause.remove(clause_ptr.to_usize());
-        #[cfg(feature = "trace_logging")]
-        log::trace!("{:1$}New split;", "", self.depth());
-        let depth = self.depth();
-        let parent_edge = self.parent.take();
-        let mut parent = self.clone();
-        parent.parent = parent_edge;
-        self.parent = Some(Edge {
-          parent: Box::new(parent),
-          branches,
-          branch_idx: 0,
-          depth,
-          reducing: true, // Not really true, but we have not taken any branch yet.
-        });
-        match self.take_next_branch() {
-          Err(()) => break,
-          Ok(x) => unknown_branch |= x,
-        }
-      }
-      if !unknown_branch {
-        return (Unsat, node_watcher);
+      match self.solve_rec(&mut node_watcher) {
+        ControlFlow::Continue(UnsatBranch) => return (Unsat, node_watcher),
+        ControlFlow::Break(x) => return (x, node_watcher),
+        ControlFlow::Continue(ReachedMaxDepth) => (),
       }
       restart_node.max_depth += MAX_DEPTH_STEP;
       self = restart_node.clone();
@@ -446,73 +378,85 @@ impl Solver {
     }
   }
 
-  /// Take the next branch at the parent, grand parent or older ancestor. Returns Err(()) if no more
-  /// branches exist. Returns `Ok(true)` if we reached max depth somewhere so there is an unknown
-  /// branch.
-  fn take_next_branch(&mut self) -> Result<bool, ()> {
-    let mut unknown_branch = false; // Set this to true if we ever reach self.max_depth.
-    loop {
-      let Some(mut edge) = self.parent.take() else {
-        #[cfg(feature = "trace_logging")]
-        log::trace!("UNSAT");
-        return Err(());
-      };
-      if edge.branch_idx < edge.branches.len() {
-        #[cfg(feature = "trace_logging")]
-        log::trace!(
-          "{:2$}There are {} branches here.",
-          "",
-          edge.branches.len() - edge.branch_idx,
-          edge.depth,
-        );
-        let branch_idx = edge.branch_idx;
-        edge.branch_idx += 1;
-        edge.reducing = edge.branches.is_reducing(branch_idx, &edge.parent);
-        edge.depth = if edge.reducing {
-          edge.parent.depth()
-        } else {
-          edge.parent.depth() + 1
-        };
-        if edge.depth >= self.max_depth {
+  fn solve_rec<W: NodeWatcher>(
+    mut self,
+    node_watcher: &mut W,
+  ) -> ControlFlow<Solution, BacktrackReason> {
+    if node_watcher.visit_node().is_break() {
+      return ControlFlow::Break(Cancelled);
+    }
+    #[cfg(feature = "trace_logging")]
+    log::trace!(
+      "{:depth$}Solving formula: {}",
+      "",
+      self.formula.display(|x| &self.var_names[x.id]),
+      depth = self.depth
+    );
+    self.assert_invariants();
+    // Run the fix point function.
+    let fix_point_res = self.fix_point();
+    #[cfg(feature = "trace_logging")]
+    log::trace!(
+      "{:depth$}After fix_point(): {}",
+      "",
+      self.formula.display(|x| &self.var_names[x.id]),
+      depth = self.depth
+    );
+    if let Err(()) = fix_point_res {
+      // This branch is unsat.
+      #[cfg(feature = "trace_logging")]
+      log::trace!("{:1$}Unsatisfiable branch;", "", self.depth);
+      return ControlFlow::Continue(UnsatBranch);
+    }
+    // Perform a split.
+    let Some((mut branches, clause_ptr)) = self.splits.pop_first() else {
+      // There are no splits so we've reached SAT!
+      #[cfg(feature = "trace_logging")]
+      log::trace!("SAT");
+      return ControlFlow::Break(Sat(SatResult::new(
+        self.original_formula.as_ref().clone(),
+        self,
+      )));
+    };
+    self.splits_for_clause.remove(clause_ptr.to_usize());
+    #[cfg(feature = "trace_logging")]
+    log::trace!("{:1$}New split;", "", self.depth);
+    let mut backtrack_reason = UnsatBranch;
+    for i in 0..branches.len() {
+      let depth = if !branches.is_reducing(i, &self) {
+        if self.depth == self.max_depth {
           #[cfg(feature = "trace_logging")]
           log::trace!(
             "{:2$}Max depth {} reached with this non reducing branch.",
             "",
             self.max_depth,
-            edge.depth,
+            self.depth,
           );
-          unknown_branch = true;
-          self.parent = Some(edge);
+          backtrack_reason.combine(ReachedMaxDepth);
           continue;
         }
-        // restor self to parent.
-        let parent_edge = edge.parent.parent.take();
-        *self = (*edge.parent).clone();
-        edge.parent.parent = parent_edge;
-        let (branch_var, replacement) = edge.branches.get(branch_idx, self);
-        self.parent = Some(edge);
-        // make the split.
-        #[cfg(feature = "trace_logging")]
-        log::trace!(
-          "{:3$}branching: {} = {}",
-          "",
-          &self.var_names[branch_var.id],
-          display_word(replacement.iter(), |x| &self.var_names[x.id]),
-          self.depth(),
-        );
-        self.fix_var(branch_var, replacement);
-        break Ok(unknown_branch);
-      }
-      // There are no more branches so let's backtrack to the grand parent.
-      *self = *edge.parent;
+        self.depth + 1
+      } else {
+        self.depth
+      };
+      let mut child = self.clone();
+      let self_copy = Rc::new(self);
+      child.parent = Some(self_copy.clone());
+      child.depth = depth;
+      let (branch_var, replacement) = branches.get(i, &mut child);
       #[cfg(feature = "trace_logging")]
       log::trace!(
-        "{:2$}Back tracking to: {}",
+        "{:3$}branching: {} = {}",
         "",
-        self.formula.display(|x| &self.var_names[x.id]),
-        edge.depth,
+        &child.var_names[branch_var.id],
+        display_word(replacement.iter(), |x| &child.var_names[x.id]),
+        depth,
       );
+      child.fix_var(branch_var, replacement);
+      backtrack_reason.combine(child.solve_rec(node_watcher)?);
+      self = Rc::into_inner(self_copy).unwrap();
     }
+    ControlFlow::Continue(backtrack_reason)
   }
 
   /// In a loop: Simplify the equations and perform unit propagation. Return Err(()) on unsat.
@@ -886,11 +830,6 @@ impl Solver {
     }
     new_var
   }
-
-  /// Get the number of reducing edges from the root to this node.
-  fn depth(&self) -> usize {
-    self.parent.as_ref().map_or(0, |x| x.depth)
-  }
 }
 
 impl Solution {
@@ -927,7 +866,7 @@ pub struct SatResult {
 }
 
 impl SatResult {
-  fn new(solver: Solver, original_formula: Formula) -> Self {
+  fn new(original_formula: Formula, solver: Solver) -> Self {
     Self {
       formula: original_formula,
       assignments: AssignedVars {
