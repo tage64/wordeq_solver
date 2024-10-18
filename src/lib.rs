@@ -5,8 +5,8 @@ pub mod vec_list;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::ops::ControlFlow;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrayvec::ArrayVec;
 use bit_set::BitSet;
@@ -15,6 +15,7 @@ use derive_more::Display;
 pub use format_duration::format_duration;
 pub use formula::*;
 pub use node_watcher::*;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use vec_list::ListPtr;
 use vec_map::VecMap;
@@ -46,23 +47,19 @@ pub fn solve_no_watch(formula: Formula) -> Solution {
   solve(formula, dummy_watcher()).0
 }
 
-/// A reason for backtracking. Either we proved UNSAT or we reached max depth.
-#[derive(Debug, Clone, Copy)]
-enum BacktrackReason {
+/// A result of a branch in the search tree.
+#[derive(Debug)]
+enum BranchResult {
+  /// A solution was found.
+  FoundSolution(Solution),
+  /// This branch is UNSAT.
   UnsatBranch,
+  /// We reached max depth and found no solution.
   ReachedMaxDepth,
+  /// Some thread set the `should_cancel_search` flag to true.
+  CancelledSearch,
 }
-use BacktrackReason::*;
-
-impl BacktrackReason {
-  /// If both self and other are UnsatBranch set self to UnsatBranch else ReachedMaxDepth.
-  fn combine(&mut self, other: BacktrackReason) {
-    *self = match (*self, other) {
-      (ReachedMaxDepth, _) | (_, ReachedMaxDepth) => ReachedMaxDepth,
-      (UnsatBranch, UnsatBranch) => UnsatBranch,
-    };
-  }
-}
+use BranchResult::*;
 
 /// A result returned from the simplify_clause function.
 #[derive(Debug, Clone)]
@@ -99,12 +96,12 @@ enum Branches {
   Empty(Variable),
   /// One variable equal to the empty string or a terminal followed by a fresh variable.
   EmptyOrTerminal(Variable, Terminal),
-  /// Two variables from LHS and RHS respectively.
+  /// Two variables, one from LHS and one from RHS.
   ///
-  /// The third argument is a bool which is true iff we try to set RHS to be empty before LHS is
-  /// empty and RHS is set to be a prefix of LHS before LHS is a prefix of RHS. This decition is
-  /// made in the first call to `self.get()`, before that it may be anything.
-  TwoVars(Variable, Variable, bool),
+  /// First, the first argument should come from LHS and the second from RHS. After calling
+  /// `self.decide_order`, the variable to pick first shall come first. `decide_order()` should
+  /// only be called once.
+  TwoVars(Variable, Variable),
 }
 
 impl Branches {
@@ -113,7 +110,7 @@ impl Branches {
     match self {
       Self::Empty(_) => 1,
       Self::EmptyOrTerminal(_, _) => 2,
-      Self::TwoVars(_, _, _) => 4,
+      Self::TwoVars(_, _) => 4,
     }
   }
 
@@ -122,34 +119,24 @@ impl Branches {
     match (self, n) {
       (Self::Empty(_), 0)
       | (Self::EmptyOrTerminal(_, _), 0)
-      | (Self::TwoVars(_, _, _), 0)
-      | (Self::TwoVars(_, _, _), 1) => true,
+      | (Self::TwoVars(_, _), 0)
+      | (Self::TwoVars(_, _), 1) => true,
       (Self::EmptyOrTerminal(x, _), 1) => {
         solver.var_ptrs[x.id].len() <= 1 && {
           let (lhs, rhs) = solver.var_ptrs[x.id].values().next().unwrap();
           lhs.len() + rhs.len() <= 1
         }
       }
-      (Self::TwoVars(_, _, _), 2) | (Self::TwoVars(_, _, _), 3) => false,
+      (Self::TwoVars(_, _), 2) | (Self::TwoVars(_, _), 3) => false,
       _ => unreachable!(),
     }
   }
 
-  /// Get the nth split as a tuple (var, replacement).
-  ///
-  /// `n` the index of the branch.
-  /// `solver` A mutable reference to the solver used to add fresh variables.
-  ///
-  /// Returns a `(variable, assignment)` pair where `variable` is the variable to be
-  /// assigned and `assignment` is the terms to assign to the variable.
-  fn get(&mut self, n: usize, solver: &mut Solver) -> (Variable, ArrayVec<Term, 2>) {
-    match (self, n) {
-      (Self::Empty(x), 0) | (Self::EmptyOrTerminal(x, _), 0) => (*x, ArrayVec::new()),
-      (Self::EmptyOrTerminal(x, a), 1) => (
-        *x,
-        [Term::Terminal(*a), Term::Variable(solver.add_fresh_var(*x))].into(),
-      ),
-      (Self::TwoVars(x, y, y_first), 0) => {
+  /// Check what variable to consider first in the two variable case.
+  fn decide_order(self, solver: &Solver) -> Self {
+    match &self {
+      Self::Empty(_) | Self::EmptyOrTerminal(_, _) => self,
+      Self::TwoVars(x, y) => {
         // Check if x or y is most common.
         let x_diff = solver.var_ptrs[x.id]
           .iter()
@@ -171,18 +158,30 @@ impl Branches {
               - rhs.0.len() as isize
           })
           .sum::<isize>();
-        *y_first = x_diff < y_diff;
-        if *y_first {
-          (*y, ArrayVec::new())
+        if x_diff < y_diff {
+          Self::TwoVars(*y, *x)
         } else {
-          (*x, ArrayVec::new())
+          Self::TwoVars(*x, *y)
         }
       }
-      (Self::TwoVars(_, x, false), 1) | (Self::TwoVars(x, _, true), 1) => (*x, ArrayVec::new()),
-      (Self::TwoVars(y, x, false), 2)
-      | (Self::TwoVars(x, y, false), 3)
-      | (Self::TwoVars(x, y, true), 2)
-      | (Self::TwoVars(y, x, true), 3) => (
+    }
+  }
+
+  /// Get the nth split as a tuple (var, replacement).
+  ///
+  /// `n` the index of the branch.
+  ///
+  /// Returns a `(variable, assignment)` pair where `variable` is the variable to be
+  /// assigned and `assignment` is the terms to assign to the variable.
+  fn get(&self, n: usize, solver: &mut Solver) -> (Variable, ArrayVec<Term, 2>) {
+    match (self, n) {
+      (Self::Empty(x), 0) | (Self::EmptyOrTerminal(x, _), 0) => (*x, ArrayVec::new()),
+      (Self::EmptyOrTerminal(x, a), 1) => (
+        *x,
+        [Term::Terminal(*a), Term::Variable(solver.add_fresh_var(*x))].into(),
+      ),
+      (Self::TwoVars(x, _), 0) | (Self::TwoVars(_, x), 1) => (*x, ArrayVec::new()),
+      (Self::TwoVars(y, x), 2) | (Self::TwoVars(x, y), 3) => (
         *x,
         [Term::Variable(*y), Term::Variable(solver.add_fresh_var(*x))].into(),
       ),
@@ -195,7 +194,7 @@ impl Branches {
 struct Solver {
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
   formula: Cnf,
-  original_formula: Rc<Formula>,
+  original_formula: Arc<Formula>,
   /// The number of variables. Maybe sparse, that is, some of the previously used variables might
   /// have been fixed but they still count.
   no_vars: usize,
@@ -215,9 +214,11 @@ struct Solver {
   splits: BTreeMap<Branches, ListPtr>,
   /// splits[c] = the splits for clause c.
   splits_for_clause: VecMap<Branches>,
-  parent: Option<Rc<Solver>>,
+  parent: Option<Arc<Solver>>,
   depth: usize,
   max_depth: usize,
+  /// Set this to true when the search should exit.
+  should_exit_search: Arc<AtomicBool>,
 }
 
 impl Solver {
@@ -252,7 +253,7 @@ impl Solver {
     Self {
       #[cfg(feature = "trace_logging")]
       var_names: var_names.clone(),
-      original_formula: Rc::new(Formula::new(formula.clone(), var_names)),
+      original_formula: Arc::new(Formula::new(formula.clone(), var_names)),
       formula,
       no_vars,
       assignments: VecMap::new(),
@@ -263,6 +264,7 @@ impl Solver {
       parent: None,
       depth: 0,
       max_depth: INITIAL_MAX_DEPTH,
+      should_exit_search: Arc::new(AtomicBool::new(false)),
     }
   }
 
@@ -364,12 +366,17 @@ impl Solver {
   ///
   /// The `var_names` argument is moved into the `SatResult` when finished.
   fn solve<W: NodeWatcher>(mut self, mut node_watcher: W) -> (Solution, W) {
+    let thread_pool = rayon::ThreadPoolBuilder::new()
+      .stack_size(100000000)
+      .build()
+      .unwrap();
     let mut restart_node = self.clone();
     loop {
-      match self.solve_rec(&mut node_watcher) {
-        ControlFlow::Continue(UnsatBranch) => return (Unsat, node_watcher),
-        ControlFlow::Break(x) => return (x, node_watcher),
-        ControlFlow::Continue(ReachedMaxDepth) => (),
+      match thread_pool.install(|| self.solve_rec(&mut node_watcher)) {
+        FoundSolution(x) => return (x, node_watcher),
+        UnsatBranch => return (Unsat, node_watcher),
+        CancelledSearch => unreachable!(),
+        ReachedMaxDepth => (),
       }
       restart_node.max_depth += MAX_DEPTH_STEP;
       self = restart_node.clone();
@@ -378,12 +385,13 @@ impl Solver {
     }
   }
 
-  fn solve_rec<W: NodeWatcher>(
-    mut self,
-    node_watcher: &mut W,
-  ) -> ControlFlow<Solution, BacktrackReason> {
+  fn solve_rec<W: NodeWatcher>(mut self, node_watcher: &W) -> BranchResult {
+    if self.should_exit_search.load(Ordering::Acquire) {
+      return CancelledSearch;
+    }
     if node_watcher.visit_node().is_break() {
-      return ControlFlow::Break(Cancelled);
+      self.should_exit_search.store(true, Ordering::Release);
+      return FoundSolution(Cancelled);
     }
     #[cfg(feature = "trace_logging")]
     log::trace!(
@@ -406,57 +414,64 @@ impl Solver {
       // This branch is unsat.
       #[cfg(feature = "trace_logging")]
       log::trace!("{:1$}Unsatisfiable branch;", "", self.depth);
-      return ControlFlow::Continue(UnsatBranch);
+      return UnsatBranch;
     }
     // Perform a split.
-    let Some((mut branches, clause_ptr)) = self.splits.pop_first() else {
+    let Some((branches, clause_ptr)) = self.splits.pop_first() else {
       // There are no splits so we've reached SAT!
       #[cfg(feature = "trace_logging")]
       log::trace!("SAT");
-      return ControlFlow::Break(Sat(SatResult::new(
+      self.should_exit_search.store(true, Ordering::Release);
+      return FoundSolution(Sat(SatResult::new(
         self.original_formula.as_ref().clone(),
         self,
       )));
     };
+    let branches = branches.decide_order(&self);
     self.splits_for_clause.remove(clause_ptr.to_usize());
     #[cfg(feature = "trace_logging")]
     log::trace!("{:1$}New split;", "", self.depth);
-    let mut backtrack_reason = UnsatBranch;
-    for i in 0..branches.len() {
-      let depth = if !branches.is_reducing(i, &self) {
-        if self.depth == self.max_depth {
-          #[cfg(feature = "trace_logging")]
-          log::trace!(
-            "{:2$}Max depth {} reached with this non reducing branch.",
-            "",
-            self.max_depth,
-            self.depth,
-          );
-          backtrack_reason.combine(ReachedMaxDepth);
-          continue;
-        }
-        self.depth + 1
-      } else {
-        self.depth
-      };
-      let mut child = self.clone();
-      let self_copy = Rc::new(self);
-      child.parent = Some(self_copy.clone());
-      child.depth = depth;
-      let (branch_var, replacement) = branches.get(i, &mut child);
-      #[cfg(feature = "trace_logging")]
-      log::trace!(
-        "{:3$}branching: {} = {}",
-        "",
-        &child.var_names[branch_var.id],
-        display_word(replacement.iter(), |x| &child.var_names[x.id]),
-        depth,
-      );
-      child.fix_var(branch_var, replacement);
-      backtrack_reason.combine(child.solve_rec(node_watcher)?);
-      self = Rc::into_inner(self_copy).unwrap();
-    }
-    ControlFlow::Continue(backtrack_reason)
+    let self_ = Arc::new(self);
+    (0..branches.len())
+      .into_par_iter()
+      .map(|i| {
+        let depth = if !branches.is_reducing(i, &self_) {
+          if self_.depth == self_.max_depth {
+            #[cfg(feature = "trace_logging")]
+            log::trace!(
+              "{:2$}Max depth {} reached with this non reducing branch.",
+              "",
+              self_.max_depth,
+              self_.depth,
+            );
+            return ReachedMaxDepth;
+          }
+          self_.depth + 1
+        } else {
+          self_.depth
+        };
+        let mut child = (*self_).clone();
+        child.parent = Some(self_.clone());
+        child.depth = depth;
+        let (branch_var, replacement) = branches.get(i, &mut child);
+        #[cfg(feature = "trace_logging")]
+        log::trace!(
+          "{:3$}branching: {} = {}",
+          "",
+          &child.var_names[branch_var.id],
+          display_word(replacement.iter(), |x| &child.var_names[x.id]),
+          depth,
+        );
+        child.fix_var(branch_var, replacement);
+        child.solve_rec(node_watcher)
+      })
+      .reduce_with(|x, y| match (x, y) {
+        (UnsatBranch, UnsatBranch) => UnsatBranch,
+        (x @ FoundSolution(_), _) | (_, x @ FoundSolution(_)) => x,
+        (CancelledSearch, _) | (_, CancelledSearch) => CancelledSearch,
+        (ReachedMaxDepth, _) | (_, ReachedMaxDepth) => ReachedMaxDepth,
+      })
+      .unwrap()
   }
 
   /// In a loop: Simplify the equations and perform unit propagation. Return Err(()) on unsat.
@@ -723,7 +738,7 @@ impl Solver {
             // RHS is a single variable.
             return Ok(UnitProp(UnitPropRhs(y)));
           } else {
-            return Ok(Split(Branches::TwoVars(x, y, Default::default())));
+            return Ok(Split(Branches::TwoVars(x, y)));
           }
         }
       };
