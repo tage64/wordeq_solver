@@ -223,6 +223,46 @@ fn summerize_results(results: &[SolverResult]) {
           })
           .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
         ),
+      )
+      .add_row(
+        [
+          "Max physical mem".to_string(),
+          format!(
+            "{:.3}",
+            (completed_results
+              .iter()
+              .map(|x| x.2.max_physical_mem)
+              .sum::<f64>()
+              / completed_results.len() as f64)
+          ),
+        ]
+        .into_iter()
+        .chain(
+          get_percentiles(percentiles, &mut completed_results, |(_, _, stats)| {
+            stats.max_physical_mem
+          })
+          .map(|x| (x as usize).to_string()),
+        ),
+      )
+      .add_row(
+        [
+          "Max virtual mem".to_string(),
+          format!(
+            "{:.3}",
+            (completed_results
+              .iter()
+              .map(|x| x.2.max_virtual_mem)
+              .sum::<f64>()
+              / completed_results.len() as f64)
+          ),
+        ]
+        .into_iter()
+        .chain(
+          get_percentiles(percentiles, &mut completed_results, |(_, _, stats)| {
+            stats.max_virtual_mem
+          })
+          .map(|x| (x as usize).to_string()),
+        ),
       );
     println!("{table}");
   }
