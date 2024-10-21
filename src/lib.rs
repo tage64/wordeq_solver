@@ -17,6 +17,8 @@ pub use formula::*;
 pub use node_watcher::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "trace_logging")]
+use vec_list::Entry;
 use vec_list::ListPtr;
 use vec_map::VecMap;
 
@@ -191,7 +193,7 @@ impl Branches {
 }
 
 #[derive(Debug, Clone)]
-struct Solver {
+pub struct Solver {
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
   formula: Cnf,
   original_formula: Arc<Formula>,
@@ -200,9 +202,6 @@ struct Solver {
   no_vars: usize,
   /// assignments[x] = the value for variable with id x.
   assignments: VecMap<Vec<Term>>,
-  #[cfg(feature = "trace_logging")]
-  /// var_names[x] = the name for variable with id x.
-  var_names: Vec<CompactString>,
   /// var_ptrs is a map with variable ids as keys, the values are maps of all clauses where that
   /// variable exists, they have clause pointers as keys and pairs (lhs_ptrs, rhs_ptrs) as
   /// values, where lhs_ptrs and rhs_ptrs are bitsets of pointers to
@@ -219,6 +218,13 @@ struct Solver {
   max_depth: usize,
   /// Set this to true when the search should exit.
   should_exit_search: Arc<AtomicBool>,
+
+  #[cfg(feature = "trace_logging")]
+  /// var_names[x] = the name for variable with id x.
+  var_names: Vec<CompactString>,
+  #[cfg(feature = "trace_logging")]
+  /// The actual depth including reducing nodes.
+  actual_depth: usize,
 }
 
 impl Solver {
@@ -253,6 +259,8 @@ impl Solver {
     Self {
       #[cfg(feature = "trace_logging")]
       var_names: var_names.clone(),
+      #[cfg(feature = "trace_logging")]
+      actual_depth: 0,
       original_formula: Arc::new(Formula::new(formula.clone(), var_names)),
       formula,
       no_vars,
@@ -380,7 +388,6 @@ impl Solver {
       }
       restart_node.max_depth += MAX_DEPTH_STEP;
       self = restart_node.clone();
-      #[cfg(feature = "trace_logging")]
       log::trace!("Increasing max depth to {}", self.max_depth);
     }
   }
@@ -389,7 +396,7 @@ impl Solver {
     if self.should_exit_search.load(Ordering::Acquire) {
       return CancelledSearch;
     }
-    if node_watcher.visit_node().is_break() {
+    if node_watcher.visit_node(&self).is_break() {
       self.should_exit_search.store(true, Ordering::Release);
       return FoundSolution(Cancelled);
     }
@@ -453,6 +460,10 @@ impl Solver {
         let mut child = (*self_).clone();
         child.parent = Some(self_.clone());
         child.depth = depth;
+        #[cfg(feature = "trace_logging")]
+        {
+          child.actual_depth = self_.actual_depth + 1;
+        }
         let (branch_var, replacement) = branches.get(i, &mut child);
         #[cfg(feature = "trace_logging")]
         log::trace!(
@@ -844,6 +855,78 @@ impl Solver {
       self.var_names.push(name);
     }
     new_var
+  }
+
+  /// Get an approximated list of the fields in this struct together with their dynamic sizes.
+  #[cfg(feature = "trace_logging")]
+  pub fn get_sizes(&self) -> [(&'static str, usize); 9] {
+    [
+      (
+        "formula",
+        size_of::<Solver>()
+          + size_of::<Cnf>()
+          + self
+            .formula
+            .0
+            .iter()
+            .map(|x| {
+              size_of::<Entry<Clause>>()
+                + size_of::<Entry<Term>>() * (x.1.equation.lhs.0.len() + x.1.equation.rhs.0.len())
+            })
+            .sum::<usize>(),
+      ),
+      ("original_formula", size_of::<Arc<Formula>>()),
+      ("no_vars", size_of::<usize>()),
+      (
+        "assignments",
+        size_of::<VecMap<Vec<Term>>>()
+          + self.assignments.capacity() * size_of::<Option<Vec<Term>>>()
+          + self
+            .assignments
+            .values()
+            .map(|x| x.capacity() * size_of::<Term>())
+            .sum::<usize>(),
+      ),
+      (
+        "var_ptrs",
+        size_of::<VecMap<VecMap<(BitSet, BitSet)>>>()
+          + self.var_ptrs.capacity() * size_of::<VecMap<(BitSet, BitSet)>>()
+          + self
+            .var_ptrs
+            .values()
+            .map(|x| {
+              x.capacity() * size_of::<(BitSet, BitSet)>()
+                + x
+                  .values()
+                  .map(|(lhs, rhs)| {
+                    (lhs.len() as f64 / 8.0).ceil() as usize
+                      + (rhs.len() as f64 / 8.0).ceil() as usize
+                  })
+                  .sum::<usize>()
+            })
+            .sum::<usize>(),
+      ),
+      (
+        "updated_clauses",
+        size_of::<BitSet>() + (self.updated_clauses.len() as f64 / 8.0).ceil() as usize,
+      ),
+      (
+        "splits",
+        size_of::<BTreeMap<Branches, ListPtr>>()
+          + self.splits.len() * (size_of::<Branches>() + size_of::<ListPtr>()),
+      ),
+      (
+        "splits_for_clause",
+        size_of::<VecMap<Branches>>() + self.splits_for_clause.capacity() * size_of::<Branches>(),
+      ),
+      (
+        "last_static_items",
+        size_of::<Option<Arc<Solver>>>()
+          + size_of::<usize>()
+          + size_of::<usize>()
+          + size_of::<Arc<AtomicBool>>(),
+      ),
+    ]
   }
 }
 

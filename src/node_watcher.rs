@@ -8,12 +8,15 @@ use derive_more::Display;
 use memory_stats::memory_stats;
 use serde::{Deserialize, Serialize};
 
-use crate::format_duration;
+use crate::*;
+
+#[cfg(feature = "trace_logging")]
+const PRINT_INTERVAL: Duration = Duration::from_millis(1000);
 
 pub trait NodeWatcher: Send + Sync {
   /// This method should be called at each node. If ite returns `ControlFlow::Break(())`, the
   /// search should exit with `Cancelled`.
-  fn visit_node(&self) -> ControlFlow<()>;
+  fn visit_node(&self, solver: &Solver) -> ControlFlow<()>;
 }
 
 /// Create a node watcher from a function.
@@ -21,7 +24,7 @@ pub fn watch_fn(f: impl Fn() -> ControlFlow<()> + Send + Sync) -> impl NodeWatch
   struct Watcher<F>(F);
   impl<F: Fn() -> ControlFlow<()> + Send + Sync> NodeWatcher for Watcher<F> {
     #[inline]
-    fn visit_node(&self) -> ControlFlow<()> {
+    fn visit_node(&self, _: &Solver) -> ControlFlow<()> {
       (self.0)()
     }
   }
@@ -48,7 +51,7 @@ impl Timeout {
 }
 
 impl NodeWatcher for Timeout {
-  fn visit_node(&self) -> ControlFlow<()> {
+  fn visit_node(&self, _: &Solver) -> ControlFlow<()> {
     if self.start.elapsed() > self.timeout {
       ControlFlow::Break(())
     } else {
@@ -78,6 +81,8 @@ pub struct CollectNodeStats {
   timeout: Option<Duration>,
   node_count: AtomicUsize,
   mem_use: Arc<Mutex<Option<(f64, f64)>>>,
+  #[cfg(feature = "trace_logging")]
+  last_print_time: Mutex<Instant>,
 }
 
 impl CollectNodeStats {
@@ -92,22 +97,25 @@ impl CollectNodeStats {
           let stats = memory_stats().unwrap();
           if stats.physical_mem as f64 / 1000000.0 > *max_physical {
             *max_physical = stats.physical_mem as f64 / 1000000.0;
-            log::trace!("Max physical mem: {max_physical} MB");
+            //log::trace!("Max physical mem: {max_physical} MB");
           }
           if stats.virtual_mem as f64 / 1000000.0 > *max_virtual {
             *max_virtual = stats.virtual_mem as f64 / 1000000.0;
-            log::trace!("Max virtual mem: {max_physical} MB");
+            //log::trace!("Max virtual mem: {max_physical} MB");
           }
         } else {
           break;
         }
       }
     });
+    let start = Instant::now();
     Self {
-      start: Instant::now(),
+      start,
       timeout,
       node_count: AtomicUsize::new(0),
       mem_use,
+      #[cfg(feature = "trace_logging")]
+      last_print_time: Mutex::new(start),
     }
   }
 
@@ -125,8 +133,30 @@ impl CollectNodeStats {
 }
 
 impl NodeWatcher for CollectNodeStats {
-  fn visit_node(&self) -> ControlFlow<()> {
+  #[cfg_attr(not(feature = "trace_logging"), expect(unused_variables))]
+  fn visit_node(&self, solver: &Solver) -> ControlFlow<()> {
     self.node_count.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "trace_logging")]
+    {
+      let mut solver_sizes = solver.get_sizes();
+      let solver_size = solver_sizes.iter().map(|x| x.1).sum::<usize>();
+      {
+        let mut last_print_time = self.last_print_time.lock().unwrap();
+        if last_print_time.elapsed() >= PRINT_INTERVAL {
+          solver_sizes.sort_by_key(|(_, x)| *x);
+          for (item, size) in solver_sizes {
+            log::trace!("- {item}: {size} B");
+          }
+          log::trace!(
+            "Actual depth: {}, no_vars: {}, Max solver size {solver_size} B, count: {}.",
+            solver.actual_depth,
+            solver.no_vars,
+            Arc::strong_count(&solver.original_formula)
+          );
+          *last_print_time = Instant::now();
+        }
+      }
+    }
     if let Some(timeout) = self.timeout {
       if self.start.elapsed() > timeout {
         ControlFlow::Break(())
