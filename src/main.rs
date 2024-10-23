@@ -1,62 +1,147 @@
 use std::fs;
 use std::io::{self, Read};
+use std::iter;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use clap::Parser as _;
-use flexi_logger::Logger;
+use flexi_logger::{LogSpecification, Logger};
+use log::LevelFilter::*;
+use smt_str_solver::benchmarks::*;
 use smt_str_solver::*;
+
+const PRINT_STATS_INTERVAL: Duration = Duration::from_millis(1000);
 
 #[derive(clap::Parser)]
 #[command(version, about, author)]
 struct Cli {
-  /// Read a .eq file, otherwise read equations line by line from STDIN where uppercase letters are
-  /// variables.
-  eq_file: Option<PathBuf>,
-  /// Try for at most this number of seconds.
+  #[command(subcommand)]
+  subcmd: Subcmd,
+  /// Timeout for each formula in seconds.
+  #[arg(short, long, default_value_t = 16.0)]
+  timeout: f64,
+  /// Print out the running time and the solution.
   #[arg(short, long)]
-  timeout: Option<f64>,
-  /// Be super verbose and print lots of trace debug info.
+  verbose: bool,
+  /// Be super verbose and print lots of trace debug info. (Requires the trace_logging feature.)
   #[arg(short, long)]
   debug: bool,
+  /// Print memory statistics with regular intervals. (Requires the trace_logging feature.)
+  #[arg(short, long)]
+  mem_info: bool,
+}
+
+#[derive(clap::Subcommand)]
+enum Subcmd {
+  /// Solve a single formula.
+  Solve {
+    /// Read a .eq file, otherwise read equations line by line from STDIN where uppercase letters are
+    /// variables.
+    eq_file: Option<PathBuf>,
+  },
+  /// Benchmark small randomly but deterministically generated formulae.
+  Random1 {
+    /// The number of formulae.
+    #[arg(default_value_t = 1000)]
+    n: usize,
+    /// Solve only the nth formula
+    #[arg(short, long)]
+    only: Option<usize>,
+  },
+  /// Run benchmark 1.
+  Benchmark1 {
+    /// Run only the n first formulae.
+    n: Option<usize>,
+  },
+  /// Run benchmark 2.
+  Benchmark2 {
+    /// Run only the n first formulae.
+    n: Option<usize>,
+  },
 }
 
 fn main() -> Result<()> {
   let cli = Cli::parse();
-  let log_level = if cli.debug { "trace" } else { "info" };
-  Logger::try_with_env_or_str(log_level)
-    .unwrap()
+  let mut log_spec_builder = LogSpecification::builder();
+  log_spec_builder.default(if cli.verbose { Info } else { Warn });
+  if cli.debug {
+    log_spec_builder.module("smt_str_solver", Trace);
+  }
+  if cli.mem_info {
+    log_spec_builder.module("smt_str_solver::node_watcher", Trace);
+  }
+  Logger::with(log_spec_builder.build())
     .format(|f, _, r| write!(f, "{}", r.args()))
     .log_to_stdout()
     .start()
     .unwrap();
-  let formula = if let Some(eq_file) = cli.eq_file {
-    Formula::from_eq_file(&fs::read_to_string(eq_file)?)?
-  } else {
-    let mut stdin = String::new();
-    io::stdin().lock().read_to_string(&mut stdin)?;
-    Formula::from_strs(
-      &stdin
-        .lines()
-        .map(|line| {
-          line
-            .split_once(" = ")
-            .ok_or_else(|| anyhow!("The LHS and RHS should be separated by \" = \""))
-        })
-        .collect::<Result<Vec<_>>>()?,
-      char::is_uppercase,
-    )
-  };
-  let (mut solution, stats) = solve(
-    formula.clone(),
-    CollectNodeStats::from_now(cli.timeout.map(Duration::from_secs_f64)),
-  );
-  let stats = stats.finished();
-  println!("{solution}; {stats}");
-  if let Sat(x) = &mut solution {
-    x.assert_correct();
-    println!("{}", x.display());
+  let timeout = Duration::from_secs_f64(cli.timeout);
+  match cli.subcmd {
+    Subcmd::Solve { eq_file } => {
+      let formula = if let Some(eq_file) = eq_file {
+        Formula::from_eq_file(&fs::read_to_string(eq_file)?)?
+      } else {
+        let mut stdin = String::new();
+        io::stdin().lock().read_to_string(&mut stdin)?;
+        Formula::from_strs(
+          &stdin
+            .lines()
+            .map(|line| {
+              line
+                .split_once(" = ")
+                .ok_or_else(|| anyhow!("The LHS and RHS should be separated by \" = \""))
+            })
+            .collect::<Result<Vec<_>>>()?,
+          char::is_uppercase,
+        )
+      };
+      let (mut solution, stats) = solve(
+        formula.clone(),
+        CollectNodeStats::from_now(
+          timeout,
+          if cli.mem_info {
+            Some(PRINT_STATS_INTERVAL)
+          } else {
+            None
+          },
+        ),
+      );
+      let stats = stats.finished();
+      println!("{solution}; {stats}");
+      if let Sat(x) = &mut solution {
+        x.assert_correct();
+        log::info!("{}", x.display());
+      }
+      Ok(())
+    }
+    Subcmd::Random1 { n, only } => {
+      if let Some(only) = only {
+        run_benchmark(
+          iter::once(
+            random_formulae(n)
+              .nth(only - 1)
+              .ok_or_else(|| anyhow!("{only} out of range"))?,
+          ),
+          timeout,
+        )
+      } else {
+        run_benchmark(random_formulae(n), timeout)
+      }
+    }
+    Subcmd::Benchmark1 { n } => {
+      if let Some(n) = n {
+        run_benchmark(benchmark_n("benchmark_1")?.take(n), timeout)
+      } else {
+        run_benchmark(benchmark_n("benchmark_1")?, timeout)
+      }
+    }
+    Subcmd::Benchmark2 { n } => {
+      if let Some(n) = n {
+        run_benchmark(benchmark_n("benchmark_2")?.take(n), timeout)
+      } else {
+        run_benchmark(benchmark_n("benchmark_2")?, timeout)
+      }
+    }
   }
-  Ok(())
 }

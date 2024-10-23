@@ -10,13 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::*;
 
-#[cfg(feature = "trace_logging")]
-const PRINT_INTERVAL: Duration = Duration::from_millis(1000);
-
 pub trait NodeWatcher: Send + Sync {
   /// This method should be called at each node. If ite returns `ControlFlow::Break(())`, the
   /// search should exit with `Cancelled`.
-  fn visit_node(&self, solver: &Solver) -> ControlFlow<()>;
+  fn visit_node(&self, solver: &SearchNode) -> ControlFlow<()>;
 }
 
 /// Create a node watcher from a function.
@@ -24,7 +21,7 @@ pub fn watch_fn(f: impl Fn() -> ControlFlow<()> + Send + Sync) -> impl NodeWatch
   struct Watcher<F>(F);
   impl<F: Fn() -> ControlFlow<()> + Send + Sync> NodeWatcher for Watcher<F> {
     #[inline]
-    fn visit_node(&self, _: &Solver) -> ControlFlow<()> {
+    fn visit_node(&self, _: &SearchNode) -> ControlFlow<()> {
       (self.0)()
     }
   }
@@ -51,7 +48,7 @@ impl Timeout {
 }
 
 impl NodeWatcher for Timeout {
-  fn visit_node(&self, _: &Solver) -> ControlFlow<()> {
+  fn visit_node(&self, _: &SearchNode) -> ControlFlow<()> {
     if self.start.elapsed() > self.timeout {
       ControlFlow::Break(())
     } else {
@@ -78,16 +75,16 @@ pub struct NodeStats {
 #[derive(Debug)]
 pub struct CollectNodeStats {
   start: Instant,
-  timeout: Option<Duration>,
+  timeout: Duration,
   node_count: AtomicUsize,
   mem_use: Arc<Mutex<Option<(f64, f64)>>>,
-  #[cfg(feature = "trace_logging")]
   last_print_time: Mutex<Instant>,
+  print_interval: Option<Duration>,
 }
 
 impl CollectNodeStats {
   /// Start the timers now.
-  pub fn from_now(timeout: Option<Duration>) -> Self {
+  pub fn from_now(timeout: Duration, print_stats_interval: Option<Duration>) -> Self {
     let mem_use = Arc::new(Mutex::new(Some((0.0, 0.0))));
     let mem_use_ = mem_use.clone();
     thread::spawn(move || {
@@ -114,8 +111,8 @@ impl CollectNodeStats {
       timeout,
       node_count: AtomicUsize::new(0),
       mem_use,
-      #[cfg(feature = "trace_logging")]
       last_print_time: Mutex::new(start),
+      print_interval: print_stats_interval,
     }
   }
 
@@ -133,36 +130,30 @@ impl CollectNodeStats {
 }
 
 impl NodeWatcher for CollectNodeStats {
-  #[cfg_attr(not(feature = "trace_logging"), expect(unused_variables))]
-  fn visit_node(&self, solver: &Solver) -> ControlFlow<()> {
+  fn visit_node(&self, solver: &SearchNode) -> ControlFlow<()> {
     self.node_count.fetch_add(1, Ordering::Relaxed);
-    #[cfg(feature = "trace_logging")]
-    {
-      let mut solver_sizes = solver.get_sizes();
-      let solver_size = solver_sizes.iter().map(|x| x.1).sum::<usize>();
+    if let Some(print_interval) = self.print_interval {
       {
-        let mut last_print_time = self.last_print_time.lock().unwrap();
-        if last_print_time.elapsed() >= PRINT_INTERVAL {
-          solver_sizes.sort_by_key(|(_, x)| *x);
-          for (item, size) in solver_sizes {
-            log::trace!("- {item}: {size} B");
+        let mut solver_sizes = solver.get_sizes();
+        let solver_size = solver_sizes.iter().map(|x| x.1).sum::<usize>();
+        {
+          let mut last_print_time = self.last_print_time.lock().unwrap();
+          if last_print_time.elapsed() >= print_interval {
+            solver_sizes.sort_by_key(|(_, x)| *x);
+            for (item, size) in solver_sizes {
+              log::trace!("- {item}: {size} B");
+            }
+            log::trace!(
+              "no_vars: {}, Max solver size {solver_size} B.",
+              solver.no_vars,
+            );
+            *last_print_time = Instant::now();
           }
-          log::trace!(
-            "Actual depth: {}, no_vars: {}, Max solver size {solver_size} B, count: {}.",
-            solver.actual_depth,
-            solver.no_vars,
-            Arc::strong_count(&solver.original_formula)
-          );
-          *last_print_time = Instant::now();
         }
       }
     }
-    if let Some(timeout) = self.timeout {
-      if self.start.elapsed() > timeout {
-        ControlFlow::Break(())
-      } else {
-        ControlFlow::Continue(())
-      }
+    if self.start.elapsed() > self.timeout {
+      ControlFlow::Break(())
     } else {
       ControlFlow::Continue(())
     }

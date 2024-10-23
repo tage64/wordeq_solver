@@ -1,8 +1,9 @@
+pub mod benchmarks;
 mod format_duration;
 mod formula;
 mod node_watcher;
 pub mod vec_list;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -15,11 +16,10 @@ use derive_more::Display;
 pub use format_duration::format_duration;
 pub use formula::*;
 pub use node_watcher::*;
+#[expect(unused_imports)]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "trace_logging")]
-use vec_list::Entry;
-use vec_list::ListPtr;
+use vec_list::{Entry, ListPtr};
 use vec_map::VecMap;
 
 const INITIAL_MAX_DEPTH: usize = 4;
@@ -35,18 +35,157 @@ pub enum Solution {
 }
 pub use Solution::*;
 
+/// Simple solve function which doesn't use a watcher.
+pub fn solve_no_watch(formula: Formula) -> Solution {
+  solve(formula, dummy_watcher()).0
+}
+
 /// Try to solve a formula.
 ///
 /// Takes in a closure (node_watcher) which may cancel the search at any node by returning
 /// `ControlFlow::Break(_)`. It will be called at every new node, right before the fix point
 /// function.
-pub fn solve<W: NodeWatcher>(formula: Formula, node_watcher: W) -> (Solution, W) {
-  Solver::new(formula.cnf, formula.var_names).solve(node_watcher)
+pub fn solve<W: NodeWatcher>(formula: Formula, mut node_watcher: W) -> (Solution, W) {
+  let mut solver = SearchNode::new(formula.cnf.clone(), formula.var_names.len());
+  /*let thread_pool = rayon::ThreadPoolBuilder::new()
+  .stack_size(100000000)
+  .build()
+  .unwrap();*/
+  let restart_node = solver.clone();
+  let mut non_reducing_max_depth = INITIAL_MAX_DEPTH;
+  loop {
+    match solve_rec(
+      solver,
+      &formula,
+      &mut node_watcher,
+      non_reducing_max_depth,
+      Arc::new(AtomicBool::new(false)),
+    ) {
+      FoundSolution(x) => return (x, node_watcher),
+      UnsatBranch => return (Unsat, node_watcher),
+      CancelledSearch => unreachable!(),
+      ReachedMaxDepth => (),
+    }
+    non_reducing_max_depth += MAX_DEPTH_STEP;
+    solver = restart_node.clone();
+    log::trace!("Increasing max depth to {}", non_reducing_max_depth);
+  }
 }
 
-/// Simple solve function which doesn't use a watcher.
-pub fn solve_no_watch(formula: Formula) -> Solution {
-  solve(formula, dummy_watcher()).0
+/// An edge in the search tree.
+#[derive(Debug)]
+struct SearchEdge {
+  parent: SearchNode,
+  branches: Branches,
+  branch_idx: usize,
+}
+
+fn solve_rec<W: NodeWatcher>(
+  mut node: SearchNode,
+  original_formula: &Formula,
+  node_watcher: &W,
+  non_reducing_max_depth: usize,
+  should_exit_search: Arc<AtomicBool>,
+) -> BranchResult {
+  let mut parent_edges = Vec::<SearchEdge>::new();
+  let mut branch_result = UnsatBranch;
+  loop {
+    if should_exit_search.load(Ordering::Acquire) {
+      return CancelledSearch;
+    }
+    if node_watcher.visit_node(&node).is_break() {
+      should_exit_search.store(true, Ordering::Release);
+      return FoundSolution(Cancelled);
+    }
+    #[cfg(feature = "trace_logging")]
+    log::trace!(
+      "{:depth$}Solving formula: {}",
+      "",
+      node.formula.display(|x| &original_formula.var_names[x.id]),
+      depth = node.depth,
+    );
+    node.assert_invariants();
+    // Run the fix point function.
+    let fix_point_res = node.fix_point();
+    #[cfg(feature = "trace_logging")]
+    log::trace!(
+      "{:depth$}After fix_point(): {}",
+      "",
+      node.formula.display(|x| &original_formula.var_names[x.id]),
+      depth = node.depth,
+    );
+    if let Err(()) = fix_point_res {
+      // This branch is unsat.
+      #[cfg(feature = "trace_logging")]
+      log::trace!("{:1$}Unsatisfiable branch;", "", node.depth);
+      parent_edges.last_mut().map(|x| x.branch_idx += 1);
+      // TODO: Maybe do something with the branch result.
+    } else {
+      // Perform a split.
+      let Some((branches, clause_ptr)) = node.splits.pop_first() else {
+        // There are no splits so we've reached SAT!
+        #[cfg(feature = "trace_logging")]
+        log::trace!("SAT");
+        should_exit_search.store(true, Ordering::Release);
+        return FoundSolution(Sat(SatResult::new(original_formula.clone(), node)));
+      };
+      let branches = branches.decide_order(&node);
+      node.splits_for_clause.remove(clause_ptr.to_usize());
+      #[cfg(feature = "trace_logging")]
+      log::trace!("{:depth$}New split;", "", depth = node.depth);
+      parent_edges.push(SearchEdge {
+        parent: node,
+        branches,
+        branch_idx: 0,
+      });
+    }
+    loop {
+      let Some(SearchEdge {
+        parent,
+        branches,
+        branch_idx,
+      }) = parent_edges.last_mut()
+      else {
+        return branch_result;
+      };
+      if *branch_idx == branches.len() {
+        parent_edges.pop();
+        parent_edges.last_mut().map(|x| x.branch_idx += 1);
+        continue;
+      }
+      let non_reducing_depth = if !branches.is_reducing(*branch_idx, parent) {
+        if parent.non_reducing_depth + 1 == non_reducing_max_depth {
+          #[cfg(feature = "trace_logging")]
+          log::trace!(
+            "{:depth$}Max depth {} reached with this non reducing branch.",
+            "",
+            non_reducing_max_depth,
+            depth = parent.depth + 1,
+          );
+          branch_result = ReachedMaxDepth;
+          *branch_idx += 1;
+          continue;
+        }
+        parent.non_reducing_depth + 1
+      } else {
+        parent.non_reducing_depth
+      };
+      node = parent.clone();
+      node.depth += 1;
+      node.non_reducing_depth = non_reducing_depth;
+      let (branch_var, replacement) = branches.get(*branch_idx);
+      #[cfg(feature = "trace_logging")]
+      log::trace!(
+        "{:depth$}branching: {} = {}",
+        "",
+        &original_formula.var_names[branch_var.id],
+        display_word(replacement.iter(), |x| &original_formula.var_names[x.id]),
+        depth = node.depth,
+      );
+      node.fix_var(branch_var, replacement);
+      break;
+    }
+  }
 }
 
 /// A result of a branch in the search tree.
@@ -117,7 +256,7 @@ impl Branches {
   }
 
   /// Given a branch index, check whether the branch will be a reducing branch or not.
-  fn is_reducing(&self, n: usize, solver: &Solver) -> bool {
+  fn is_reducing(&self, n: usize, solver: &SearchNode) -> bool {
     match (self, n) {
       (Self::Empty(_), 0)
       | (Self::EmptyOrTerminal(_, _), 0)
@@ -135,7 +274,7 @@ impl Branches {
   }
 
   /// Check what variable to consider first in the two variable case.
-  fn decide_order(self, solver: &Solver) -> Self {
+  fn decide_order(self, solver: &SearchNode) -> Self {
     match &self {
       Self::Empty(_) | Self::EmptyOrTerminal(_, _) => self,
       Self::TwoVars(x, y) => {
@@ -175,33 +314,37 @@ impl Branches {
   ///
   /// Returns a `(variable, assignment)` pair where `variable` is the variable to be
   /// assigned and `assignment` is the terms to assign to the variable.
-  fn get(&self, n: usize, solver: &mut Solver) -> (Variable, ArrayVec<Term, 2>) {
+  fn get(&self, n: usize) -> (Variable, ArrayVec<Term, 2>) {
     match (self, n) {
       (Self::Empty(x), 0) | (Self::EmptyOrTerminal(x, _), 0) => (*x, ArrayVec::new()),
-      (Self::EmptyOrTerminal(x, a), 1) => (
-        *x,
-        [Term::Terminal(*a), Term::Variable(solver.add_fresh_var(*x))].into(),
-      ),
+      (Self::EmptyOrTerminal(x, a), 1) => (*x, [Term::Terminal(*a), Term::Variable(*x)].into()),
       (Self::TwoVars(x, _), 0) | (Self::TwoVars(_, x), 1) => (*x, ArrayVec::new()),
-      (Self::TwoVars(y, x), 2) | (Self::TwoVars(x, y), 3) => (
-        *x,
-        [Term::Variable(*y), Term::Variable(solver.add_fresh_var(*x))].into(),
-      ),
+      (Self::TwoVars(y, x), 2) | (Self::TwoVars(x, y), 3) => {
+        (*x, [Term::Variable(*y), Term::Variable(*x)].into())
+      }
       _ => unreachable!(),
     }
   }
 }
 
 #[derive(Debug, Clone)]
-pub struct Solver {
+pub struct SearchNode {
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
   formula: Cnf,
-  original_formula: Arc<Formula>,
   /// The number of variables. Maybe sparse, that is, some of the previously used variables might
   /// have been fixed but they still count.
   no_vars: usize,
-  /// assignments[x] = the value for variable with id x.
-  assignments: VecMap<Vec<Term>>,
+  /// assignments[x] = the value for variable with id x in the original formula.
+  ///
+  /// Note that the variable ids in the keys of this map corresponds to the variables in the
+  /// original formula, while the variable ids in the values of this map as well as the variable
+  /// ids in other parts of the solver changes over time. More specifically, if for instance the
+  /// variable X gets assigned the value YX' where X' is a fresh variable, X' will reuse the id for
+  /// X in all parts of the solver except the keys in this map.
+  assignments: VecMap<Word>,
+  /// assignments_var_ptrs[x][y] = a bitset for occurences of the variable x in the original
+  /// variable y.
+  assignments_var_ptrs: VecMap<VecMap<BitSet>>,
   /// var_ptrs is a map with variable ids as keys, the values are maps of all clauses where that
   /// variable exists, they have clause pointers as keys and pairs (lhs_ptrs, rhs_ptrs) as
   /// values, where lhs_ptrs and rhs_ptrs are bitsets of pointers to
@@ -213,23 +356,14 @@ pub struct Solver {
   splits: BTreeMap<Branches, ListPtr>,
   /// splits[c] = the splits for clause c.
   splits_for_clause: VecMap<Branches>,
-  parent: Option<Arc<Solver>>,
+  /// The number of nodes above this node in the search tree.
   depth: usize,
-  max_depth: usize,
-  /// Set this to true when the search should exit.
-  should_exit_search: Arc<AtomicBool>,
-
-  #[cfg(feature = "trace_logging")]
-  /// var_names[x] = the name for variable with id x.
-  var_names: Vec<CompactString>,
-  #[cfg(feature = "trace_logging")]
-  /// The actual depth including reducing nodes.
-  actual_depth: usize,
+  /// The number of non reducing edges above this node in the search tree.
+  non_reducing_depth: usize,
 }
 
-impl Solver {
-  fn new(formula: Cnf, var_names: Vec<CompactString>) -> Self {
-    let no_vars = var_names.len();
+impl SearchNode {
+  fn new(formula: Cnf, no_vars: usize) -> Self {
     let mut var_ptrs = VecMap::with_capacity(no_vars);
     for (clause_ptr, clause) in formula.0.iter() {
       for (term_ptr, term) in clause.equation.lhs.0.iter() {
@@ -257,36 +391,24 @@ impl Solver {
     }
     let updated_clauses = formula.0.iter().map(|(ptr, _)| ptr.to_usize()).collect();
     Self {
-      #[cfg(feature = "trace_logging")]
-      var_names: var_names.clone(),
-      #[cfg(feature = "trace_logging")]
-      actual_depth: 0,
-      original_formula: Arc::new(Formula::new(formula.clone(), var_names)),
       formula,
       no_vars,
       assignments: VecMap::new(),
+      assignments_var_ptrs: VecMap::new(),
       var_ptrs,
       updated_clauses,
       splits: BTreeMap::new(),
       splits_for_clause: VecMap::new(),
-      parent: None,
       depth: 0,
-      max_depth: INITIAL_MAX_DEPTH,
-      should_exit_search: Arc::new(AtomicBool::new(false)),
+      non_reducing_depth: 0,
     }
   }
 
   #[cfg(debug_assertions)]
   fn assert_invariants(&self) {
     // Assert invariants related to self.var_ptrs and self.assignments.
-    #[cfg(feature = "trace_logging")]
-    assert_eq!(self.no_vars, self.var_names.len());
     // Check that self.var_ptrs is sound.
     for var in (0..self.no_vars).map(|id| Variable { id }) {
-      assert!(
-        !(self.assignments.contains_key(var.id) && self.var_ptrs.contains_key(var.id)),
-        "self.assignments and self.var_ptrs should be disjunct."
-      );
       if self.var_ptrs.contains_key(var.id) {
         // Check that all pointers actually point to terms with var.
         for (clause_id, (lhs_ptrs, rhs_ptrs)) in &self.var_ptrs[var.id] {
@@ -345,6 +467,26 @@ impl Solver {
       }
     }
 
+    // Check that self.assignments and self.assignments_var_ptrs are consistent with each other.
+    for (var_id, assignment) in self.assignments.iter() {
+      for (ptr, term) in assignment.0.iter() {
+        if let Term::Variable(x) = term {
+          assert!(self.assignments_var_ptrs[x.id][var_id].contains(ptr.to_usize()));
+        }
+      }
+    }
+    for (var_id, var_ptrs) in self.assignments_var_ptrs.iter() {
+      assert!(!var_ptrs.is_empty(), "empty maps should not exist.");
+      for (orig_var_id, ptrs) in var_ptrs.iter() {
+        for ptr in ptrs.iter().map(ListPtr::from_usize) {
+          assert_eq!(
+            &Term::Variable(Variable { id: var_id }),
+            self.assignments[orig_var_id].0.get(ptr)
+          );
+        }
+      }
+    }
+
     // Check that self.updated_clauses point to valid clauses.
     self
       .updated_clauses
@@ -354,136 +496,9 @@ impl Solver {
     for (branches, clause_ptr) in self.splits.iter() {
       assert_eq!(&self.splits_for_clause[clause_ptr.to_usize()], branches);
     }
-
-    // Check that the depth is correct.
-    let mut solver = self;
-    while let Some(parent) = &solver.parent {
-      assert!(parent.depth + 1 == solver.depth || parent.depth == solver.depth);
-      solver = &*parent;
-    }
-    assert_eq!(solver.depth, 0);
   }
   #[cfg(not(debug_assertions))]
   fn assert_invariants(&self) {}
-
-  /// Solve the formula.
-  ///
-  /// Takes in a closure (node_watcher) which may cancel the search at any node by returning
-  /// `ControlFlow::Break(_)`. It will be called at every new node, right before the fix point
-  /// function.
-  ///
-  /// The `var_names` argument is moved into the `SatResult` when finished.
-  fn solve<W: NodeWatcher>(mut self, mut node_watcher: W) -> (Solution, W) {
-    let thread_pool = rayon::ThreadPoolBuilder::new()
-      .stack_size(100000000)
-      .build()
-      .unwrap();
-    let mut restart_node = self.clone();
-    loop {
-      match thread_pool.install(|| self.solve_rec(&mut node_watcher)) {
-        FoundSolution(x) => return (x, node_watcher),
-        UnsatBranch => return (Unsat, node_watcher),
-        CancelledSearch => unreachable!(),
-        ReachedMaxDepth => (),
-      }
-      restart_node.max_depth += MAX_DEPTH_STEP;
-      self = restart_node.clone();
-      log::trace!("Increasing max depth to {}", self.max_depth);
-    }
-  }
-
-  fn solve_rec<W: NodeWatcher>(mut self, node_watcher: &W) -> BranchResult {
-    if self.should_exit_search.load(Ordering::Acquire) {
-      return CancelledSearch;
-    }
-    if node_watcher.visit_node(&self).is_break() {
-      self.should_exit_search.store(true, Ordering::Release);
-      return FoundSolution(Cancelled);
-    }
-    #[cfg(feature = "trace_logging")]
-    log::trace!(
-      "{:depth$}Solving formula: {}",
-      "",
-      self.formula.display(|x| &self.var_names[x.id]),
-      depth = self.depth
-    );
-    self.assert_invariants();
-    // Run the fix point function.
-    let fix_point_res = self.fix_point();
-    #[cfg(feature = "trace_logging")]
-    log::trace!(
-      "{:depth$}After fix_point(): {}",
-      "",
-      self.formula.display(|x| &self.var_names[x.id]),
-      depth = self.depth
-    );
-    if let Err(()) = fix_point_res {
-      // This branch is unsat.
-      #[cfg(feature = "trace_logging")]
-      log::trace!("{:1$}Unsatisfiable branch;", "", self.depth);
-      return UnsatBranch;
-    }
-    // Perform a split.
-    let Some((branches, clause_ptr)) = self.splits.pop_first() else {
-      // There are no splits so we've reached SAT!
-      #[cfg(feature = "trace_logging")]
-      log::trace!("SAT");
-      self.should_exit_search.store(true, Ordering::Release);
-      return FoundSolution(Sat(SatResult::new(
-        self.original_formula.as_ref().clone(),
-        self,
-      )));
-    };
-    let branches = branches.decide_order(&self);
-    self.splits_for_clause.remove(clause_ptr.to_usize());
-    #[cfg(feature = "trace_logging")]
-    log::trace!("{:1$}New split;", "", self.depth);
-    let self_ = Arc::new(self);
-    (0..branches.len())
-      .into_par_iter()
-      .map(|i| {
-        let depth = if !branches.is_reducing(i, &self_) {
-          if self_.depth == self_.max_depth {
-            #[cfg(feature = "trace_logging")]
-            log::trace!(
-              "{:2$}Max depth {} reached with this non reducing branch.",
-              "",
-              self_.max_depth,
-              self_.depth,
-            );
-            return ReachedMaxDepth;
-          }
-          self_.depth + 1
-        } else {
-          self_.depth
-        };
-        let mut child = (*self_).clone();
-        child.parent = Some(self_.clone());
-        child.depth = depth;
-        #[cfg(feature = "trace_logging")]
-        {
-          child.actual_depth = self_.actual_depth + 1;
-        }
-        let (branch_var, replacement) = branches.get(i, &mut child);
-        #[cfg(feature = "trace_logging")]
-        log::trace!(
-          "{:3$}branching: {} = {}",
-          "",
-          &child.var_names[branch_var.id],
-          display_word(replacement.iter(), |x| &child.var_names[x.id]),
-          depth,
-        );
-        child.fix_var(branch_var, replacement);
-        child.solve_rec(node_watcher)
-      })
-      .reduce_with(|x, y| match (x, y) {
-        (UnsatBranch, UnsatBranch) => UnsatBranch,
-        (x @ FoundSolution(_), _) | (_, x @ FoundSolution(_)) => x,
-        (CancelledSearch, _) | (_, CancelledSearch) => CancelledSearch,
-        (ReachedMaxDepth, _) | (_, ReachedMaxDepth) => ReachedMaxDepth,
-      })
-      .unwrap()
-  }
 
   /// In a loop: Simplify the equations and perform unit propagation. Return Err(()) on unsat.
   fn fix_point(&mut self) -> Result<(), ()> {
@@ -791,14 +806,7 @@ impl Solver {
 
   /// Given a variable and a value, replace all occurences of that variable with the value.
   fn fix_var(&mut self, var: Variable, val: impl IntoIterator<Item = Term> + Clone) {
-    debug_assert!(
-      val
-        .clone()
-        .into_iter()
-        .find(|x| *x == Term::Variable(var))
-        .is_none()
-    );
-    for (clause_id, (lhs_ptrs, rhs_ptrs)) in self.var_ptrs[var.id].clone().iter() {
+    for (clause_id, (lhs_ptrs, rhs_ptrs)) in self.var_ptrs.remove(var.id).unwrap().iter() {
       self.updated_clauses.insert(clause_id);
       if let Some(branches) = self.splits_for_clause.remove(clause_id) {
         self.splits.remove(&branches);
@@ -840,30 +848,50 @@ impl Solver {
         rhs.0.remove(term_ptr);
       }
     }
-    self.var_ptrs.remove(var.id);
-    self.assignments.insert(var.id, val.into_iter().collect());
-  }
-
-  /// Add a fresh variable and increment self.no_vars.
-  #[allow(unused_variables)]
-  fn add_fresh_var(&mut self, from: Variable) -> Variable {
-    let new_var = Variable { id: self.no_vars };
-    self.no_vars += 1;
-    #[cfg(feature = "trace_logging")]
-    {
-      let name = self.var_names[from.id].clone() + "'";
-      self.var_names.push(name);
+    if let Some(var_ptrs) = self.assignments_var_ptrs.remove(var.id) {
+      for (orig_var_id, ptrs) in var_ptrs {
+        let assignment = &mut self.assignments[orig_var_id];
+        for term_ptr in ptrs.iter().map(ListPtr::from_usize) {
+          for insert_term in val.clone() {
+            let insert_ptr = assignment.0.insert_before(term_ptr, insert_term);
+            if let Term::Variable(x) = insert_term {
+              self
+                .assignments_var_ptrs
+                .entry(x.id)
+                .or_insert_with(VecMap::new)
+                .entry(orig_var_id)
+                .or_insert_with(BitSet::new)
+                .insert(insert_ptr.to_usize());
+            }
+          }
+          assignment.0.remove(term_ptr);
+        }
+      }
     }
-    new_var
+    if let vec_map::Entry::Vacant(entry) = self.assignments.entry(var.id) {
+      let mut assignment = Word::default();
+      for insert_term in val.clone() {
+        let insert_ptr = assignment.0.insert_back(insert_term);
+        if let Term::Variable(x) = insert_term {
+          self
+            .assignments_var_ptrs
+            .entry(x.id)
+            .or_insert_with(VecMap::new)
+            .entry(var.id)
+            .or_insert_with(BitSet::new)
+            .insert(insert_ptr.to_usize());
+        }
+      }
+      entry.insert(assignment);
+    }
   }
 
   /// Get an approximated list of the fields in this struct together with their dynamic sizes.
-  #[cfg(feature = "trace_logging")]
   pub fn get_sizes(&self) -> [(&'static str, usize); 9] {
     [
       (
         "formula",
-        size_of::<Solver>()
+        size_of::<SearchNode>()
           + size_of::<Cnf>()
           + self
             .formula
@@ -875,16 +903,31 @@ impl Solver {
             })
             .sum::<usize>(),
       ),
-      ("original_formula", size_of::<Arc<Formula>>()),
       ("no_vars", size_of::<usize>()),
       (
         "assignments",
-        size_of::<VecMap<Vec<Term>>>()
-          + self.assignments.capacity() * size_of::<Option<Vec<Term>>>()
+        size_of::<VecMap<Word>>()
+          + self.assignments.capacity() * size_of::<Option<Word>>()
           + self
             .assignments
             .values()
-            .map(|x| x.capacity() * size_of::<Term>())
+            .map(|x| x.0.len() * size_of::<Term>())
+            .sum::<usize>(),
+      ),
+      (
+        "assignments_var_ptrs",
+        size_of::<VecMap<VecMap<BitSet>>>()
+          + self.assignments_var_ptrs.capacity() * size_of::<VecMap<BitSet>>()
+          + self
+            .assignments_var_ptrs
+            .values()
+            .map(|x| {
+              x.capacity() * size_of::<BitSet>()
+                + x
+                  .values()
+                  .map(|ptrs| (ptrs.len() as f64 / 8.0).ceil() as usize)
+                  .sum::<usize>()
+            })
             .sum::<usize>(),
       ),
       (
@@ -919,13 +962,7 @@ impl Solver {
         "splits_for_clause",
         size_of::<VecMap<Branches>>() + self.splits_for_clause.capacity() * size_of::<Branches>(),
       ),
-      (
-        "last_static_items",
-        size_of::<Option<Arc<Solver>>>()
-          + size_of::<usize>()
-          + size_of::<usize>()
-          + size_of::<Arc<AtomicBool>>(),
-      ),
+      ("last_static_items", size_of::<usize>() + size_of::<usize>()),
     ]
   }
 }
@@ -958,41 +995,43 @@ impl Solution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SatResult {
   formula: Formula,
-  assignments: AssignedVars,
+  assignments: VecMap<Word>,
+  /// Cached string values for variables.
+  #[serde(skip)]
+  cached_assignments: RefCell<VecMap<CompactString>>,
   /// The formula where all variables have been substituted to a satisfying solution.
-  substituted_formula: Option<Vec<(CompactString, CompactString)>>,
+  #[serde(skip)]
+  substituted_formula: OnceCell<Vec<(CompactString, CompactString)>>,
 }
 
 impl SatResult {
-  fn new(original_formula: Formula, solver: Solver) -> Self {
+  fn new(original_formula: Formula, solver: SearchNode) -> Self {
     Self {
       formula: original_formula,
-      assignments: AssignedVars {
-        assignments: solver.assignments,
-        var_cache: VecMap::new(),
-      },
-      substituted_formula: None,
+      assignments: solver.assignments,
+      cached_assignments: RefCell::new(VecMap::new()),
+      substituted_formula: OnceCell::new(),
     }
   }
 
   /// Get all clauses ((LHS, RHS) pairs) where all variables have been replaced by terminals
   /// to form a satisfying solution.
-  pub fn substituted_formula(&mut self) -> &Vec<(CompactString, CompactString)> {
-    self.substituted_formula.get_or_insert_with(|| {
+  pub fn substituted_formula(&self) -> &Vec<(CompactString, CompactString)> {
+    self.substituted_formula.get_or_init(|| {
       let mut substituted_formula = Vec::new();
       for (_, clause) in self.formula.cnf.0.iter() {
         let mut substituted_lhs = CompactString::default();
         for (_, term) in clause.equation.lhs.0.iter() {
           match *term {
             Term::Terminal(Terminal(c)) => substituted_lhs.push(c),
-            Term::Variable(var) => substituted_lhs += self.assignments.get_var(var),
+            Term::Variable(var) => substituted_lhs += &self.get_var(var),
           }
         }
         let mut substituted_rhs = CompactString::default();
         for (_, term) in clause.equation.rhs.0.iter() {
           match *term {
             Term::Terminal(Terminal(c)) => substituted_rhs.push(c),
-            Term::Variable(var) => substituted_rhs += self.assignments.get_var(var),
+            Term::Variable(var) => substituted_rhs += &self.get_var(var),
           }
         }
         substituted_formula.push((substituted_lhs, substituted_rhs));
@@ -1002,14 +1041,32 @@ impl SatResult {
   }
 
   /// Get a value for a variable which contribute to a satisfying solution.
-  pub fn get_var(&mut self, var: Variable) -> &str {
-    self.assignments.get_var(var)
+  pub fn get_var(&self, var: Variable) -> CompactString {
+    if let Some(x) = self.cached_assignments.borrow().get(var.id) {
+      return x.clone();
+    }
+    let val = if let Some(assignment) = self.assignments.get(var.id) {
+      assignment
+        .0
+        .iter()
+        .filter_map(|(_, term)| {
+          if let Term::Terminal(Terminal(c)) = *term {
+            Some(c)
+          } else {
+            None
+          }
+        })
+        .collect()
+    } else {
+      Default::default()
+    };
+    self.cached_assignments.borrow_mut().insert(var.id, val);
+    self.cached_assignments.borrow()[var.id].clone()
   }
 
   /// Check that the solution is correct.
   pub fn assert_correct(&mut self) {
-    self.substituted_formula();
-    for (lhs, rhs) in self.substituted_formula.as_ref().unwrap() {
+    for (lhs, rhs) in self.substituted_formula() {
       if lhs != rhs {
         panic!("The solution is not correct: {}.", self.display());
       }
@@ -1040,29 +1097,5 @@ impl SatResult {
     }
 
     Displayer(RefCell::new(self))
-  }
-}
-
-/// Struct for holding and incrementally updating variables.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AssignedVars {
-  assignments: VecMap<Vec<Term>>,
-  var_cache: VecMap<CompactString>,
-}
-
-impl AssignedVars {
-  fn get_var(&mut self, var: Variable) -> &str {
-    if self.var_cache.contains_key(var.id) {
-      return &self.var_cache[var.id];
-    }
-    let mut res = CompactString::default();
-    for term in self.assignments.remove(var.id).unwrap_or_default() {
-      match term {
-        Term::Terminal(Terminal(c)) => res.push(c),
-        Term::Variable(var) => res += self.get_var(var),
-      }
-    }
-    self.var_cache.insert(var.id, res);
-    &self.var_cache[var.id]
   }
 }

@@ -12,7 +12,7 @@ command = ["cargo", "check", "--color", "always"]
 need_stdout = false
 
 [jobs.check-all]
-command = ["cargo", "check", "--all-targets", "--color", "always"]
+command = ["cargo", "check", "--all-features", "--all-targets", "--color", "always"]
 need_stdout = false
 
 # Run clippy on the default target
@@ -39,6 +39,7 @@ need_stdout = false
 [jobs.clippy-all]
 command = [
     "cargo", "clippy",
+    "--all-features",
     "--all-targets",
     "--color", "always",
 ]

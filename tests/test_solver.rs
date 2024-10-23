@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use smt_str_solver::benchmarks::*;
 use smt_str_solver::vec_list::VecList;
 use smt_str_solver::*;
 
@@ -33,4 +36,9 @@ fn test_simple_equations() {
     Vec::new(),
   );
   solve_no_watch(formula_3).assert_unsat();
+}
+
+#[test]
+fn random1_tests() {
+  run_benchmark(random_formulae(1000), Duration::from_secs(8)).unwrap();
 }

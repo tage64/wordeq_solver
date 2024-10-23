@@ -27,7 +27,7 @@ impl ListPtr {
 
 /// An occupied entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OccupiedEntry<T> {
+pub(crate) struct OccupiedEntry<T> {
   item: T,
   prev: Option<ListPtr>,
   next: Option<ListPtr>,
@@ -35,7 +35,7 @@ struct OccupiedEntry<T> {
 
 /// An entry in a list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum Entry<T> {
+pub(crate) enum Entry<T> {
   Occupied(OccupiedEntry<T>),
   Vacant {
     /// The next vacant entry.
@@ -328,6 +328,12 @@ impl<T> FromIterator<T> for VecList<T> {
       list.insert_back(x);
     }
     list
+  }
+}
+
+impl<T> Default for VecList<T> {
+  fn default() -> Self {
+    VecList::new()
   }
 }
 

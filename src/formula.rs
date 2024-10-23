@@ -25,25 +25,25 @@ pub enum Term {
 }
 
 /// A word is a list of terms.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Word(pub VecList<Term>);
 
 /// An equality constraint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Equation {
   pub lhs: Word,
   pub rhs: Word,
 }
 
 /// A clause in a conjunction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Clause {
   /// This could be extended to be disjunction and negations but it is only an equation for now.
   pub equation: Equation,
 }
 
 /// A list of clauses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Cnf(pub VecList<Clause>);
 
 /// A formula.
