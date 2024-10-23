@@ -1,7 +1,9 @@
 use std::fs;
 use std::io::{self, Read};
 use std::iter;
+use std::num::NonZero;
 use std::path::PathBuf;
+use std::thread::available_parallelism;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -21,6 +23,9 @@ struct Cli {
   /// Timeout for each formula in seconds.
   #[arg(short, long, default_value_t = 16.0)]
   timeout: f64,
+  /// The number of threads, defaults to to the available number of threads on the system.
+  #[arg(short = 'p', long)]
+  threads: Option<NonZero<u32>>,
   /// Print out the running time and the solution.
   #[arg(short, long)]
   verbose: bool,
@@ -77,6 +82,13 @@ fn main() -> Result<()> {
     .start()
     .unwrap();
   let timeout = Duration::from_secs_f64(cli.timeout);
+  let n_threads = if let Some(x) = cli.threads {
+    x
+  } else {
+    let threads = available_parallelism()?;
+    log::info!("Using {} threads.", threads.get());
+    threads.try_into().unwrap()
+  };
   match cli.subcmd {
     Subcmd::Solve { eq_file } => {
       let formula = if let Some(eq_file) = eq_file {
@@ -106,6 +118,7 @@ fn main() -> Result<()> {
             None
           },
         ),
+        n_threads,
       );
       let stats = stats.finished();
       println!("{solution}; {stats}");
@@ -113,7 +126,6 @@ fn main() -> Result<()> {
         x.assert_correct();
         log::info!("{}", x.display());
       }
-      Ok(())
     }
     Subcmd::Random1 { n, only } => {
       if let Some(only) = only {
@@ -124,24 +136,26 @@ fn main() -> Result<()> {
               .ok_or_else(|| anyhow!("{only} out of range"))?,
           ),
           timeout,
-        )
+          n_threads,
+        )?;
       } else {
-        run_benchmark(random_formulae(n), timeout)
+        run_benchmark(random_formulae(n), timeout, n_threads)?;
       }
     }
     Subcmd::Benchmark1 { n } => {
       if let Some(n) = n {
-        run_benchmark(benchmark_n("benchmark_1")?.take(n), timeout)
+        run_benchmark(benchmark_n("benchmark_1")?.take(n), timeout, n_threads)?;
       } else {
-        run_benchmark(benchmark_n("benchmark_1")?, timeout)
+        run_benchmark(benchmark_n("benchmark_1")?, timeout, n_threads)?;
       }
     }
     Subcmd::Benchmark2 { n } => {
       if let Some(n) = n {
-        run_benchmark(benchmark_n("benchmark_2")?.take(n), timeout)
+        run_benchmark(benchmark_n("benchmark_2")?.take(n), timeout, n_threads)?;
       } else {
-        run_benchmark(benchmark_n("benchmark_2")?, timeout)
+        run_benchmark(benchmark_n("benchmark_2")?, timeout, n_threads)?;
       }
     }
   }
+  Ok(())
 }

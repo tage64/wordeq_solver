@@ -143,10 +143,7 @@ impl NodeWatcher for CollectNodeStats {
             for (item, size) in solver_sizes {
               log::trace!("- {item}: {size} B");
             }
-            log::trace!(
-              "no_vars: {}, Max solver size {solver_size} B.",
-              solver.no_vars,
-            );
+            log::trace!("Max solver size {solver_size} B.",);
             *last_print_time = Instant::now();
           }
         }

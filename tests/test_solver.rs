@@ -7,7 +7,7 @@ use smt_str_solver::*;
 #[test]
 fn test_simple_equations() {
   let formula_1 = Formula::new(Cnf(VecList::new()), Vec::new());
-  solve_no_watch(formula_1).assert_sat();
+  solve_simple(formula_1).assert_sat();
   let formula_2 = Formula::new(
     Cnf(
       [Clause {
@@ -21,7 +21,7 @@ fn test_simple_equations() {
     ),
     vec!["X".into(), "Y".into()],
   );
-  solve_no_watch(formula_2).assert_sat();
+  solve_simple(formula_2).assert_sat();
   let formula_3 = Formula::new(
     Cnf(
       [Clause {
@@ -35,10 +35,31 @@ fn test_simple_equations() {
     ),
     Vec::new(),
   );
-  solve_no_watch(formula_3).assert_unsat();
+  solve_simple(formula_3).assert_unsat();
 }
 
 #[test]
-fn random1_tests() {
-  run_benchmark(random_formulae(1000), Duration::from_secs(8)).unwrap();
+fn random1_single_threaded() {
+  let results = run_benchmark(
+    random_formulae(1000),
+    Duration::from_secs(8),
+    1.try_into().unwrap(),
+  )
+  .unwrap();
+  for (_, result, _) in results.into_iter() {
+    result.assert_sat();
+  }
+}
+
+#[test]
+fn random1_multi_threaded() {
+  let results = run_benchmark(
+    random_formulae(1000),
+    Duration::from_secs(8),
+    4.try_into().unwrap(),
+  )
+  .unwrap();
+  for (_, result, _) in results.into_iter() {
+    result.assert_sat();
+  }
 }

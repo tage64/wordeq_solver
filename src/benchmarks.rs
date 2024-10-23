@@ -1,4 +1,5 @@
 use std::fs;
+use std::num::NonZero;
 use std::time::Duration;
 
 use rand::prelude::*;
@@ -10,11 +11,16 @@ type SolverResult = (Formula, Solution, NodeStats);
 pub fn run_benchmark(
   formulae: impl ExactSizeIterator<Item = Formula>,
   timeout: Duration,
-) -> anyhow::Result<()> {
+  n_threads: NonZero<u32>,
+) -> anyhow::Result<Vec<SolverResult>> {
   let mut results: Vec<SolverResult> = Vec::new();
   for (i, formula) in formulae.enumerate() {
     log::info!("Formula {}: {formula}", i + 1);
-    let (mut solution, stats) = solve(formula.clone(), CollectNodeStats::from_now(timeout, None));
+    let (mut solution, stats) = solve(
+      formula.clone(),
+      CollectNodeStats::from_now(timeout, None),
+      n_threads,
+    );
     let stats = stats.finished();
     log::info!("  {solution}; {stats}");
     if let Sat(x) = &mut solution {
@@ -23,7 +29,7 @@ pub fn run_benchmark(
     results.push((formula, solution, stats));
   }
   summerize_results(&results);
-  Ok(())
+  Ok(results)
 }
 
 /// A generator for small random formulae.  These should only take milli seconds to solve so they

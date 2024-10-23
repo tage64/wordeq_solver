@@ -103,6 +103,11 @@ impl Formula {
   pub fn from_eq_file(text: &str) -> anyhow::Result<Self> {
     eq_parser::EqParser::parse_to_formula(text)
   }
+
+  /// The number of variables in this formula.
+  pub fn no_vars(&self) -> usize {
+    self.var_names.len()
+  }
 }
 
 pub fn display_word<'a, D: fmt::Display>(
