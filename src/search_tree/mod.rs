@@ -18,7 +18,7 @@ use crate::*;
 
 const INITIAL_MAX_DEPTH: usize = 4;
 const MAX_DEPTH_STEP: usize = 2;
-const THREAD_STACK_SIZE: usize = 2usize.pow(21);
+const THREAD_STACK_SIZE: usize = 2usize.pow(25);
 
 /// Simple solve function which doesn't use a watcher and only runs on one thread.
 pub fn solve_simple(formula: Formula) -> Solution {
