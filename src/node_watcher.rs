@@ -1,29 +1,37 @@
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use derive_more::Display;
-use memory_stats::memory_stats;
 use serde::{Deserialize, Serialize};
 
 use crate::*;
+//use memory_stats::memory_stats;
 
 pub trait NodeWatcher: Send + Sync {
-  /// This method should be called at each node. If ite returns `ControlFlow::Break(())`, the
-  /// search should exit with `Cancelled`.
+  /// Type which the watcher should be converted to when it is finished.
+  type Finished;
+
+  /// This method should be called before each node. If it returns `ControlFlow::Break(())`, the
+  /// search should exit with `Cancelled`. Note that this method may be called after it has
+  /// returned `Break` due to multiple threads.
   fn visit_node(&self, solver: &SearchNode) -> ControlFlow<()>;
+
+  /// Called when the search is finished.
+  fn finish(self) -> Self::Finished;
 }
 
 /// Create a node watcher from a function.
 pub fn watch_fn(f: impl Fn() -> ControlFlow<()> + Send + Sync) -> impl NodeWatcher {
   struct Watcher<F>(F);
   impl<F: Fn() -> ControlFlow<()> + Send + Sync> NodeWatcher for Watcher<F> {
+    type Finished = ();
     #[inline]
     fn visit_node(&self, _: &SearchNode) -> ControlFlow<()> {
       (self.0)()
     }
+    fn finish(self) -> () {}
   }
   Watcher(f)
 }
@@ -48,6 +56,7 @@ impl Timeout {
 }
 
 impl NodeWatcher for Timeout {
+  type Finished = ();
   fn visit_node(&self, _: &SearchNode) -> ControlFlow<()> {
     if self.start.elapsed() > self.timeout {
       ControlFlow::Break(())
@@ -55,83 +64,94 @@ impl NodeWatcher for Timeout {
       ControlFlow::Continue(())
     }
   }
+  fn finish(self) -> () {}
 }
 
 /// Statistics about a search. Retrieved from the `CollectNodeStats` watcher.
 #[derive(Debug, Clone, Display, Serialize, Deserialize)]
 #[display(
-  "{node_count} nodes in {}. Mean node time: {}.",
-  format_duration(self.search_time),
-  format_duration(self.search_time/self.node_count.try_into().unwrap())
+  "{node_count} nodes in {}. Mean node time: {}, startup time {}.",
+  format_duration(self.total_time()),
+  format_duration(self.search_time/self.node_count.try_into().unwrap()),
+  format_duration(self.startup_time),
 )]
 pub struct NodeStats {
+  /// The number of visited nodes.
   pub node_count: usize,
+  /// The time between the initialization of the watcher and the first node was visited.
+  ///
+  /// This time typically includes the time to spawn all threads.
+  pub startup_time: Duration,
+  /// The time from the first node to till the search was finished.
   pub search_time: Duration,
-  pub max_physical_mem: f64,
-  pub max_virtual_mem: f64,
+  // Some out commented features follow.
+  //pub max_physical_mem: f64,
+  //pub max_virtual_mem: f64,
 }
 
 /// A watcher which collects statistics about the number of nodes and related information.
 #[derive(Debug)]
 pub struct CollectNodeStats {
+  /// The timestamp when the search started.
   start: Instant,
+  /// The pre-set timeout for the search.
   timeout: Duration,
+  /// The number of visited nodes.
   node_count: AtomicUsize,
-  mem_use: Arc<Mutex<Option<(f64, f64)>>>,
+  /// The time between the start and the first visited node.
+  startup_time: OnceLock<Duration>,
   last_print_time: Mutex<Instant>,
   print_interval: Option<Duration>,
+  // Out commented feature:
+  //mem_use: Arc<Mutex<Option<(f64, f64)>>>,
 }
 
 impl CollectNodeStats {
   /// Start the timers now.
   pub fn from_now(timeout: Duration, print_stats_interval: Option<Duration>) -> Self {
-    let mem_use = Arc::new(Mutex::new(Some((0.0, 0.0))));
-    let mem_use_ = mem_use.clone();
-    thread::spawn(move || {
-      loop {
-        thread::sleep(Duration::from_millis(10));
-        if let Some((max_physical, max_virtual)) = mem_use_.lock().unwrap().as_mut() {
-          let stats = memory_stats().unwrap();
-          if stats.physical_mem as f64 / 1000000.0 > *max_physical {
-            *max_physical = stats.physical_mem as f64 / 1000000.0;
-            //log::trace!("Max physical mem: {max_physical} MB");
+    /* Out commented feature:
+      let mem_use = Arc::new(Mutex::new(Some((0.0, 0.0))));
+      let mem_use_ = mem_use.clone();
+      thread::spawn(move || {
+        loop {
+          thread::sleep(Duration::from_millis(10));
+          if let Some((max_physical, max_virtual)) = mem_use_.lock().unwrap().as_mut() {
+            let stats = memory_stats().unwrap();
+            if stats.physical_mem as f64 / 1000000.0 > *max_physical {
+              *max_physical = stats.physical_mem as f64 / 1000000.0;
+              //log::trace!("Max physical mem: {max_physical} MB");
+            }
+            if stats.virtual_mem as f64 / 1000000.0 > *max_virtual {
+              *max_virtual = stats.virtual_mem as f64 / 1000000.0;
+              //log::trace!("Max virtual mem: {max_physical} MB");
+            }
+          } else {
+            break;
           }
-          if stats.virtual_mem as f64 / 1000000.0 > *max_virtual {
-            *max_virtual = stats.virtual_mem as f64 / 1000000.0;
-            //log::trace!("Max virtual mem: {max_physical} MB");
-          }
-        } else {
-          break;
         }
-      }
-    });
+      });
+    */
+
     let start = Instant::now();
     Self {
       start,
       timeout,
       node_count: AtomicUsize::new(0),
-      mem_use,
+      startup_time: OnceLock::new(),
       last_print_time: Mutex::new(start),
       print_interval: print_stats_interval,
-    }
-  }
-
-  /// Call this immediately after the solver is finished to get correct times.
-  pub fn finished(self) -> NodeStats {
-    let search_time = self.start.elapsed();
-    let (max_physical_mem, max_virtual_mem) = self.mem_use.lock().unwrap().take().unwrap();
-    NodeStats {
-      search_time,
-      node_count: self.node_count.into_inner(),
-      max_physical_mem,
-      max_virtual_mem,
     }
   }
 }
 
 impl NodeWatcher for CollectNodeStats {
+  type Finished = NodeStats;
+
   fn visit_node(&self, solver: &SearchNode) -> ControlFlow<()> {
-    self.node_count.fetch_add(1, Ordering::Relaxed);
+    let running_time = self.start.elapsed();
+    if 0 == self.node_count.fetch_add(1, Ordering::Relaxed) {
+      let _ = self.startup_time.set(running_time);
+    }
     if let Some(print_interval) = self.print_interval {
       {
         let mut solver_sizes = solver.get_sizes();
@@ -149,10 +169,30 @@ impl NodeWatcher for CollectNodeStats {
         }
       }
     }
-    if self.start.elapsed() > self.timeout {
+    if running_time > self.timeout {
       ControlFlow::Break(())
     } else {
       ControlFlow::Continue(())
     }
+  }
+
+  fn finish(self) -> NodeStats {
+    let startup_time = *self.startup_time.get().unwrap();
+    let search_time = self.start.elapsed() - startup_time;
+    //let (max_physical_mem, max_virtual_mem) = self.mem_use.lock().unwrap().take().unwrap();
+    NodeStats {
+      search_time,
+      startup_time,
+      node_count: self.node_count.into_inner(),
+      //max_physical_mem,
+      //max_virtual_mem,
+    }
+  }
+}
+
+impl NodeStats {
+  /// Get the total time. I.E startup time + search time.
+  pub fn total_time(&self) -> Duration {
+    self.startup_time + self.search_time
   }
 }

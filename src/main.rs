@@ -120,7 +120,6 @@ fn main() -> Result<()> {
         ),
         n_threads,
       );
-      let stats = stats.finished();
       println!("{solution}; {stats}");
       if let Sat(x) = &mut solution {
         x.assert_correct();

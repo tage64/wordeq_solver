@@ -16,6 +16,10 @@ use splits::Splits;
 
 use crate::*;
 
+const INITIAL_MAX_DEPTH: usize = 4;
+const MAX_DEPTH_STEP: usize = 2;
+const THREAD_STACK_SIZE: usize = 2usize.pow(21);
+
 /// Simple solve function which doesn't use a watcher and only runs on one thread.
 pub fn solve_simple(formula: Formula) -> Solution {
   solve(formula, dummy_watcher(), 1.try_into().unwrap()).0
@@ -30,12 +34,12 @@ pub fn solve<W: NodeWatcher>(
   formula: Formula,
   node_watcher: W,
   n_threads: NonZero<u32>,
-) -> (Solution, W) {
+) -> (Solution, W::Finished) {
   let solution = match SearchTree::create(&formula, &node_watcher, n_threads) {
     Break(x) => x,
     Continue(search_tree) => search_tree.search(),
   };
-  (solution, node_watcher)
+  (solution, node_watcher.finish())
 }
 
 /// A search tree. It takes care of managing all threads and performing the search.

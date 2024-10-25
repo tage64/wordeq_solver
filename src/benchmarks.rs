@@ -21,7 +21,6 @@ pub fn run_benchmark(
       CollectNodeStats::from_now(timeout, None),
       n_threads,
     );
-    let stats = stats.finished();
     log::info!("  {solution}; {stats}");
     if let Sat(x) = &mut solution {
       x.assert_correct();
@@ -134,11 +133,11 @@ fn summerize_results(results: &[SolverResult]) {
       ])
       .add_row(
         [
-          "Search time".to_string(),
+          "Startup time".to_string(),
           format_duration(
             completed_results
               .iter()
-              .map(|x| x.2.search_time)
+              .map(|x| x.2.startup_time)
               .sum::<Duration>()
               / completed_results.len() as u32,
           )
@@ -147,7 +146,27 @@ fn summerize_results(results: &[SolverResult]) {
         .into_iter()
         .chain(
           get_percentiles(percentiles, &mut completed_results, |(_, _, stats)| {
-            stats.search_time.as_secs_f64()
+            stats.startup_time.as_secs_f64()
+          })
+          .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
+        ),
+      )
+      .add_row(
+        [
+          "Time".to_string(),
+          format_duration(
+            completed_results
+              .iter()
+              .map(|x| x.2.total_time())
+              .sum::<Duration>()
+              / completed_results.len() as u32,
+          )
+          .to_string(),
+        ]
+        .into_iter()
+        .chain(
+          get_percentiles(percentiles, &mut completed_results, |(_, _, stats)| {
+            stats.total_time().as_secs_f64()
           })
           .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
         ),
@@ -194,7 +213,8 @@ fn summerize_results(results: &[SolverResult]) {
           })
           .map(|x| format_duration(Duration::from_secs_f64(x)).to_string()),
         ),
-      )
+      );
+    /* Out commented feature to print memory usage.
       .add_row(
         [
           "Max physical mem".to_string(),
@@ -235,6 +255,7 @@ fn summerize_results(results: &[SolverResult]) {
           .map(|x| (x as usize).to_string()),
         ),
       );
+    */
     println!("{table}");
   }
 }
