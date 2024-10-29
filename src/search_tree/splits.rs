@@ -29,7 +29,7 @@ impl Splits {
   pub fn len(&self) -> u32 {
     match self {
       Self::Empty(_) => 1,
-      Self::EmptyOrTerminal(_, a) => cmp::min(2, a.0.len() as u32 + 1),
+      Self::EmptyOrTerminal(_, a) => cmp::min(AtomicBitSet::MAX, a.0.len() as u32 + 1),
       Self::TwoVars(_, _) => 4,
     }
   }
