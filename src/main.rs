@@ -85,10 +85,9 @@ fn main() -> Result<()> {
   let n_threads = if let Some(x) = cli.threads {
     x
   } else {
-    let threads = available_parallelism()?;
-    log::info!("Using {} threads.", threads.get());
-    threads.try_into().unwrap()
+    available_parallelism()?.try_into().unwrap()
   };
+  log::info!("Using {} threads.", n_threads.get());
   match cli.subcmd {
     Subcmd::Solve { eq_file } => {
       let formula = if let Some(eq_file) = eq_file {

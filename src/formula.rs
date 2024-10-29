@@ -1,6 +1,7 @@
 mod eq_parser;
 use std::collections::HashMap;
 use std::fmt;
+use std::mem;
 
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
@@ -8,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::vec_list::VecList;
 
 /// A terminal (a character).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Terminal(pub char);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Terminal(pub CompactString);
 
 /// A variable with a unique id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -18,7 +19,7 @@ pub struct Variable {
 }
 
 /// A terminal or variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Term {
   Terminal(Terminal),
   Variable(Variable),
@@ -63,28 +64,50 @@ impl Formula {
     let mut cnf = Cnf(VecList::with_capacity(equations.len()));
     for (text_lhs, text_rhs) in equations {
       let mut lhs = Word(VecList::with_capacity(text_lhs.len()));
-      let mut rhs = Word(VecList::with_capacity(text_rhs.len()));
+      let mut curr_lhs_terminal = CompactString::default();
       for c in text_lhs.chars() {
-        let term = if is_variable(c) {
+        if is_variable(c) {
+          if !curr_lhs_terminal.is_empty() {
+            lhs.0.insert_back(Term::Terminal(Terminal(mem::replace(
+              &mut curr_lhs_terminal,
+              Default::default(),
+            ))));
+          }
           let next_var_id = used_vars.len();
-          Term::Variable(Variable {
+          lhs.0.insert_back(Term::Variable(Variable {
             id: *used_vars.entry(c).or_insert(next_var_id),
-          })
+          }));
         } else {
-          Term::Terminal(Terminal(c))
-        };
-        lhs.0.insert_back(term);
+          curr_lhs_terminal.push(c);
+        }
       }
+      if !curr_lhs_terminal.is_empty() {
+        lhs
+          .0
+          .insert_back(Term::Terminal(Terminal(curr_lhs_terminal)));
+      }
+      let mut rhs = Word(VecList::with_capacity(text_rhs.len()));
+      let mut curr_rhs_terminal = CompactString::default();
       for c in text_rhs.chars() {
-        let term = if is_variable(c) {
+        if is_variable(c) {
+          if !curr_rhs_terminal.is_empty() {
+            rhs.0.insert_back(Term::Terminal(Terminal(mem::replace(
+              &mut curr_rhs_terminal,
+              Default::default(),
+            ))));
+          }
           let next_var_id = used_vars.len();
-          Term::Variable(Variable {
+          rhs.0.insert_back(Term::Variable(Variable {
             id: *used_vars.entry(c).or_insert(next_var_id),
-          })
+          }));
         } else {
-          Term::Terminal(Terminal(c))
-        };
-        rhs.0.insert_back(term);
+          curr_rhs_terminal.push(c);
+        }
+      }
+      if !curr_rhs_terminal.is_empty() {
+        rhs
+          .0
+          .insert_back(Term::Terminal(Terminal(curr_rhs_terminal)));
       }
       cnf.0.insert_back(Clause {
         equation: Equation { lhs, rhs },

@@ -318,7 +318,7 @@ impl SearchNode {
             // Check if RHS contains var.
             if self.var_ptrs[var.id][clause_ptr.to_usize()].1.is_empty() {
               // RHS does not contain var.
-              self.fix_var(var, rhs.clone().0.iter().map(|(_, x)| *x));
+              self.fix_var(var, rhs.clone().0.iter().map(|(_, x)| x.clone()));
             } else {
               // Set everything in RHS but var to be empty.
               let mut var_occurences = 0; // Count occurences of var in RHS.
@@ -347,7 +347,7 @@ impl SearchNode {
             // Check if LHS contains var.
             if self.var_ptrs[var.id][clause_ptr.to_usize()].0.is_empty() {
               // LHS does not contain var.
-              self.fix_var(var, lhs.clone().0.iter().map(|(_, x)| *x));
+              self.fix_var(var, lhs.clone().0.iter().map(|(_, x)| x.clone()));
             } else {
               // Set everything in LHS but var to be empty.
               let mut var_occurences = 0; // Count occurences of var in LHS.
@@ -391,8 +391,8 @@ impl SearchNode {
     loop {
       let lhs_back_ptr = lhs.0.back();
       let rhs_back_ptr = rhs.0.back();
-      let lhs_back = lhs_back_ptr.map(|x| *lhs.0.get(x));
-      let rhs_back = rhs_back_ptr.map(|x| *rhs.0.get(x));
+      let lhs_back = lhs_back_ptr.map(|x| lhs.0.get_mut(x));
+      let rhs_back = rhs_back_ptr.map(|x| rhs.0.get_mut(x));
       match (lhs_back, rhs_back) {
         (None, None) => return Ok(BothSidesEmpty),
         (None, Some(Term::Variable(_))) => {
@@ -412,31 +412,40 @@ impl SearchNode {
           }
         }
         (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(()),
-        (Some(x), Some(y)) if x == y => {
-          // Both sides ends with the same terminal or variable.
+        (Some(Term::Variable(x)), Some(Term::Variable(y))) if x == y => {
+          // Both sides ends with the same variable.
+          // Check if we should remove from self.var_ptrs.
+          // We removed the variable x at both LHS and RHS.
+          let vec_map::Entry::Occupied(mut entry) =
+            self.var_ptrs[x.id].entry(clause_ptr.to_usize())
+          else {
+            unreachable!()
+          };
+          entry.get_mut().0.remove(lhs_back_ptr.unwrap().to_usize());
+          entry.get_mut().1.remove(rhs_back_ptr.unwrap().to_usize());
+          if entry.get().0.is_empty() && entry.get().1.is_empty() {
+            entry.remove();
+          }
+          if self.var_ptrs[x.id].is_empty() {
+            self.var_ptrs.remove(x.id);
+          }
           lhs.0.remove(lhs_back_ptr.unwrap());
           rhs.0.remove(rhs_back_ptr.unwrap());
-          // Check if we should remove from self.var_ptrs.
-          if let Term::Variable(x) = x {
-            // We removed the variable x at both LHS and RHS.
-            let vec_map::Entry::Occupied(mut entry) =
-              self.var_ptrs[x.id].entry(clause_ptr.to_usize())
-            else {
-              unreachable!()
-            };
-            entry.get_mut().0.remove(lhs_back_ptr.unwrap().to_usize());
-            entry.get_mut().1.remove(rhs_back_ptr.unwrap().to_usize());
-            if entry.get().0.is_empty() && entry.get().1.is_empty() {
-              entry.remove();
-            }
-            if self.var_ptrs[x.id].is_empty() {
-              self.var_ptrs.remove(x.id);
-            }
-          }
         }
-        // Rule 6: Both sides end with distinct terminals:
-        (Some(Term::Terminal(_)), Some(Term::Terminal(_))) => {
-          return Err(());
+        (Some(Term::Terminal(a)), Some(Term::Terminal(b))) => {
+          if a == b {
+            lhs.0.remove(lhs_back_ptr.unwrap());
+            rhs.0.remove(rhs_back_ptr.unwrap());
+          } else if a.0.ends_with(b.0.as_str()) {
+            a.0.truncate(a.0.len() - b.0.len());
+            rhs.0.remove(rhs_back_ptr.unwrap());
+          } else if b.0.ends_with(a.0.as_str()) {
+            b.0.truncate(b.0.len() - a.0.len());
+            lhs.0.remove(lhs_back_ptr.unwrap());
+          } else {
+            // Rule 6: Both sides end with distinct terminals:
+            return Err(());
+          }
         }
         (Some(Term::Variable(_)), Some(_)) | (Some(_), Some(Term::Variable(_))) => break,
       }
@@ -445,8 +454,8 @@ impl SearchNode {
     loop {
       let lhs_head_ptr = lhs.0.head();
       let rhs_head_ptr = rhs.0.head();
-      let lhs_head = lhs_head_ptr.map(|x| *lhs.0.get(x));
-      let rhs_head = rhs_head_ptr.map(|x| *rhs.0.get(x));
+      let lhs_head = lhs_head_ptr.map(|x| lhs.0.get(x));
+      let rhs_head = rhs_head_ptr.map(|x| rhs.0.get(x));
       match (lhs_head, rhs_head) {
         (None, None) => return Ok(BothSidesEmpty),
         (None, Some(Term::Variable(_))) => {
@@ -466,59 +475,74 @@ impl SearchNode {
           }
         }
         (None, Some(Term::Terminal(_))) | (Some(Term::Terminal(_)), None) => return Err(()),
-        (Some(x), Some(y)) if x == y => {
-          // Both sides starts with the same terminal or variable.
+        (Some(Term::Variable(x)), Some(Term::Variable(y))) if x == y => {
+          // Both sides starts with the same variable.
+          // Check if we should remove from self.var_ptrs.
+          // We removed the variable x at both LHS and RHS.
+          let vec_map::Entry::Occupied(mut entry) =
+            self.var_ptrs[x.id].entry(clause_ptr.to_usize())
+          else {
+            unreachable!()
+          };
+          entry.get_mut().0.remove(lhs_head_ptr.unwrap().to_usize());
+          entry.get_mut().1.remove(rhs_head_ptr.unwrap().to_usize());
+          if entry.get().0.is_empty() && entry.get().1.is_empty() {
+            entry.remove();
+          }
+          if self.var_ptrs[x.id].is_empty() {
+            self.var_ptrs.remove(x.id);
+          }
           lhs.0.remove(lhs_head_ptr.unwrap());
           rhs.0.remove(rhs_head_ptr.unwrap());
-          // Check if we should remove from self.var_ptrs.
-          if let Term::Variable(x) = x {
-            // We removed the variable x at both LHS and RHS.
-            let vec_map::Entry::Occupied(mut entry) =
-              self.var_ptrs[x.id].entry(clause_ptr.to_usize())
-            else {
+        }
+        (Some(Term::Terminal(a)), Some(Term::Terminal(b))) => {
+          if a == b {
+            lhs.0.remove(lhs_head_ptr.unwrap());
+            rhs.0.remove(rhs_head_ptr.unwrap());
+          } else if a.0.starts_with(b.0.as_str()) {
+            let Term::Terminal(a) = lhs.0.get_mut(lhs_head_ptr.unwrap()) else {
               unreachable!()
             };
-            entry.get_mut().0.remove(lhs_head_ptr.unwrap().to_usize());
-            entry.get_mut().1.remove(rhs_head_ptr.unwrap().to_usize());
-            if entry.get().0.is_empty() && entry.get().1.is_empty() {
-              entry.remove();
-            }
-            if self.var_ptrs[x.id].is_empty() {
-              self.var_ptrs.remove(x.id);
-            }
+            drop(a.0.drain(..b.0.len()));
+            rhs.0.remove(rhs_head_ptr.unwrap());
+          } else if b.0.starts_with(a.0.as_str()) {
+            let Term::Terminal(b) = rhs.0.get_mut(rhs_head_ptr.unwrap()) else {
+              unreachable!()
+            };
+            drop(b.0.drain(..a.0.len()));
+            lhs.0.remove(lhs_head_ptr.unwrap());
+          } else {
+            // Rule 6: Both sides start with distinct terminals:
+            return Err(());
           }
-        }
-        // Rule 6: Both sides start with distinct terminals:
-        (Some(Term::Terminal(_)), Some(Term::Terminal(_))) => {
-          return Err(());
         }
         // Rule 7: One side starts with a terminal and the other starts with a variable.
         (Some(Term::Terminal(a)), Some(Term::Variable(x))) => {
           if rhs_head_ptr == rhs.0.back() {
             // RHS is a single variable.
-            return Ok(UnitProp(UnitPropRhs(x)));
+            return Ok(UnitProp(UnitPropRhs(*x)));
           } else {
-            return Ok(Split(Splits::EmptyOrTerminal(x, a)));
+            return Ok(Split(Splits::EmptyOrTerminal(*x, a.clone())));
           }
         }
         (Some(Term::Variable(x)), Some(Term::Terminal(a))) => {
           if lhs_head_ptr == lhs.0.back() {
             // LHS is a single variable.
-            return Ok(UnitProp(UnitPropLhs(x)));
+            return Ok(UnitProp(UnitPropLhs(*x)));
           } else {
-            return Ok(Split(Splits::EmptyOrTerminal(x, a)));
+            return Ok(Split(Splits::EmptyOrTerminal(*x, a.clone())));
           }
         }
         // Rule 8: Both sides starts with variables.
         (Some(Term::Variable(x)), Some(Term::Variable(y))) => {
           if lhs_head_ptr == lhs.0.back() {
             // LHS is a single variable.
-            return Ok(UnitProp(UnitPropLhs(x)));
+            return Ok(UnitProp(UnitPropLhs(*x)));
           } else if rhs_head_ptr == rhs.0.back() {
             // RHS is a single variable.
-            return Ok(UnitProp(UnitPropRhs(y)));
+            return Ok(UnitProp(UnitPropRhs(*y)));
           } else {
-            return Ok(Split(Splits::TwoVars(x, y)));
+            return Ok(Split(Splits::TwoVars(*x, *y)));
           }
         }
       };
@@ -571,8 +595,9 @@ impl SearchNode {
       } = self.formula.0.get_mut(clause_ptr);
       for term_ptr in lhs_ptrs.iter().map(ListPtr::from_usize) {
         for insert_term in val.clone() {
-          let insert_ptr = lhs.0.insert_before(term_ptr, insert_term);
-          if let Term::Variable(var) = insert_term {
+          if let Term::Variable(var) = &insert_term {
+            let var = *var;
+            let insert_ptr = lhs.0.insert_before(term_ptr, insert_term);
             self
               .var_ptrs
               .entry(var.id)
@@ -581,14 +606,17 @@ impl SearchNode {
               .or_insert((BitSet::new(), BitSet::new()))
               .0
               .insert(insert_ptr.to_usize());
+          } else {
+            lhs.0.insert_before(term_ptr, insert_term);
           }
         }
         lhs.0.remove(term_ptr);
       }
       for term_ptr in rhs_ptrs.iter().map(ListPtr::from_usize) {
         for insert_term in val.clone() {
-          let insert_ptr = rhs.0.insert_before(term_ptr, insert_term);
-          if let Term::Variable(var) = insert_term {
+          if let Term::Variable(var) = &insert_term {
+            let var = *var;
+            let insert_ptr = rhs.0.insert_before(term_ptr, insert_term);
             self
               .var_ptrs
               .entry(var.id)
@@ -597,6 +625,8 @@ impl SearchNode {
               .or_insert((BitSet::new(), BitSet::new()))
               .1
               .insert(insert_ptr.to_usize());
+          } else {
+            rhs.0.insert_before(term_ptr, insert_term);
           }
         }
         rhs.0.remove(term_ptr);
@@ -607,8 +637,9 @@ impl SearchNode {
         let assignment = &mut self.assignments[orig_var_id];
         for term_ptr in ptrs.iter().map(ListPtr::from_usize) {
           for insert_term in val.clone() {
-            let insert_ptr = assignment.0.insert_before(term_ptr, insert_term);
-            if let Term::Variable(x) = insert_term {
+            if let Term::Variable(x) = &insert_term {
+              let x = *x;
+              let insert_ptr = assignment.0.insert_before(term_ptr, insert_term);
               self
                 .assignments_var_ptrs
                 .entry(x.id)
@@ -616,6 +647,8 @@ impl SearchNode {
                 .entry(orig_var_id)
                 .or_insert_with(BitSet::new)
                 .insert(insert_ptr.to_usize());
+            } else {
+              assignment.0.insert_before(term_ptr, insert_term);
             }
           }
           assignment.0.remove(term_ptr);
@@ -625,8 +658,9 @@ impl SearchNode {
     if let vec_map::Entry::Vacant(entry) = self.assignments.entry(var.id) {
       let mut assignment = Word::default();
       for insert_term in val.clone() {
-        let insert_ptr = assignment.0.insert_back(insert_term);
-        if let Term::Variable(x) = insert_term {
+        if let Term::Variable(x) = &insert_term {
+          let x = *x;
+          let insert_ptr = assignment.0.insert_back(insert_term);
           self
             .assignments_var_ptrs
             .entry(x.id)
@@ -634,6 +668,8 @@ impl SearchNode {
             .entry(var.id)
             .or_insert_with(BitSet::new)
             .insert(insert_ptr.to_usize());
+        } else {
+          assignment.0.insert_back(insert_term);
         }
       }
       entry.insert(assignment);

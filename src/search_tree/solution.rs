@@ -74,16 +74,16 @@ impl SatResult {
       for (_, clause) in self.formula.cnf.0.iter() {
         let mut substituted_lhs = CompactString::default();
         for (_, term) in clause.equation.lhs.0.iter() {
-          match *term {
-            Term::Terminal(Terminal(c)) => substituted_lhs.push(c),
-            Term::Variable(var) => substituted_lhs += &self.get_var(var),
+          match term {
+            Term::Terminal(Terminal(s)) => substituted_lhs += s,
+            Term::Variable(var) => substituted_lhs += &self.get_var(*var),
           }
         }
         let mut substituted_rhs = CompactString::default();
         for (_, term) in clause.equation.rhs.0.iter() {
-          match *term {
-            Term::Terminal(Terminal(c)) => substituted_rhs.push(c),
-            Term::Variable(var) => substituted_rhs += &self.get_var(var),
+          match term {
+            Term::Terminal(Terminal(s)) => substituted_rhs += s,
+            Term::Variable(var) => substituted_rhs += &self.get_var(*var),
           }
         }
         substituted_formula.push((substituted_lhs, substituted_rhs));
@@ -102,8 +102,8 @@ impl SatResult {
         .0
         .iter()
         .filter_map(|(_, term)| {
-          if let Term::Terminal(Terminal(c)) = *term {
-            Some(c)
+          if let Term::Terminal(Terminal(s)) = term {
+            Some(s.as_str())
           } else {
             None
           }

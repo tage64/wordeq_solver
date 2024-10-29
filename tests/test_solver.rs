@@ -26,7 +26,7 @@ fn test_simple_equations() {
     Cnf(
       [Clause {
         equation: Equation {
-          lhs: Word([Term::Terminal(Terminal('a'))].into_iter().collect()),
+          lhs: Word([Term::Terminal(Terminal("a".into()))].into_iter().collect()),
           rhs: Word(VecList::new()),
         },
       }]

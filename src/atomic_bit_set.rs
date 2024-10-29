@@ -45,7 +45,11 @@ impl AtomicBitSet {
     set_order: Ordering,
     fetch_order: Ordering,
   ) -> Option<u32> {
-    debug_assert!(below <= Self::MAX);
+    debug_assert!(
+      below <= Self::MAX,
+      "Argument below is {below}, must be <= {}",
+      Self::MAX
+    );
     let mut prev = self.0.load(fetch_order);
     loop {
       let index = prev.trailing_ones();

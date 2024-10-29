@@ -1,3 +1,5 @@
+use std::cmp;
+
 use arrayvec::ArrayVec;
 use vec_list::ListPtr;
 
@@ -27,7 +29,7 @@ impl Splits {
   pub fn len(&self) -> u32 {
     match self {
       Self::Empty(_) => 1,
-      Self::EmptyOrTerminal(_, _) => 2,
+      Self::EmptyOrTerminal(_, a) => cmp::min(2, a.0.len() as u32 + 1),
       Self::TwoVars(_, _) => 4,
     }
   }
@@ -35,11 +37,8 @@ impl Splits {
   /// Given a branch index, check whether the split will be a reducing split or not.
   pub fn is_reducing(&self, n: u32, solver: &SearchNode) -> bool {
     match (self, n) {
-      (Self::Empty(_), 0)
-      | (Self::EmptyOrTerminal(_, _), 0)
-      | (Self::TwoVars(_, _), 0)
-      | (Self::TwoVars(_, _), 1) => true,
-      (Self::EmptyOrTerminal(x, _), 1) => {
+      (Self::Empty(_), 0) | (Self::EmptyOrTerminal(_, _), 0) | (Self::TwoVars(_, _), 0 | 1) => true,
+      (Self::EmptyOrTerminal(x, _), 1..) => {
         solver.var_ptrs[x.id].len() <= 1 && {
           let (lhs, rhs) = solver.var_ptrs[x.id].values().next().unwrap();
           lhs.len() + rhs.len() <= 1
@@ -94,7 +93,26 @@ impl Splits {
   pub fn get(&self, n: u32) -> (Variable, ArrayVec<Term, 2>) {
     match (self, n) {
       (Self::Empty(x), 0) | (Self::EmptyOrTerminal(x, _), 0) => (*x, ArrayVec::new()),
-      (Self::EmptyOrTerminal(x, a), 1) => (*x, [Term::Terminal(*a), Term::Variable(*x)].into()),
+      (Self::EmptyOrTerminal(x, a), n) => {
+        // TODO: Try to remove cloning.
+        if n < self.len() - 1 {
+          (
+            *x,
+            [Term::Terminal(Terminal(a.0[..n as usize].into()))]
+              .into_iter()
+              .collect(),
+          )
+        } else {
+          (
+            *x,
+            [
+              Term::Terminal(Terminal(a.0[..n as usize].into())),
+              Term::Variable(*x),
+            ]
+            .into(),
+          )
+        }
+      }
       (Self::TwoVars(x, _), 0) | (Self::TwoVars(_, x), 1) => (*x, ArrayVec::new()),
       (Self::TwoVars(y, x), 2) | (Self::TwoVars(x, y), 3) => {
         (*x, [Term::Variable(*y), Term::Variable(*x)].into())
