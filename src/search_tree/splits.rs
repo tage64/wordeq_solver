@@ -61,8 +61,8 @@ impl Splits {
             let Clause {
               equation: Equation { lhs, rhs },
             } = solver.formula.0.get(ListPtr::from_usize(clause_id));
-            x_in_lhs.len() as isize - x_in_rhs.len() as isize + rhs.0.len() as isize
-              - lhs.0.len() as isize
+            x_in_lhs.len() as isize - x_in_rhs.len() as isize + guess_word_len(rhs) as isize
+              - guess_word_len(lhs) as isize
           })
           .sum::<isize>();
         let y_diff = solver.var_ptrs[y.id]
@@ -71,8 +71,8 @@ impl Splits {
             let Clause {
               equation: Equation { lhs, rhs },
             } = solver.formula.0.get(ListPtr::from_usize(clause_id));
-            y_in_rhs.len() as isize - y_in_lhs.len() as isize + lhs.0.len() as isize
-              - rhs.0.len() as isize
+            y_in_rhs.len() as isize - y_in_lhs.len() as isize + guess_word_len(lhs) as isize
+              - guess_word_len(rhs) as isize
           })
           .sum::<isize>();
         if x_diff < y_diff {
@@ -120,4 +120,20 @@ impl Splits {
       _ => unreachable!(),
     }
   }
+}
+
+/// Given a word, estimate the length of the word by counting all characters and counting variables
+/// as one character.
+fn guess_word_len(word: &Word) -> usize {
+  word
+    .0
+    .iter()
+    .map(|(_, t)| {
+      if let Term::Terminal(s) = t {
+        s.0.len()
+      } else {
+        1
+      }
+    })
+    .sum()
 }
