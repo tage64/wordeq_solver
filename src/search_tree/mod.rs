@@ -12,7 +12,7 @@ use std::thread;
 
 use branches::{Branches, SearchResult::*};
 pub use node::SearchNode;
-use splits::Splits;
+use splits::{SplitKind, Splits};
 
 use crate::*;
 
@@ -46,15 +46,13 @@ pub fn solve<W: NodeWatcher>(
 ///
 /// See the documentation for individual fields for more details.
 struct SearchTree<'a, W> {
-  /// A reference to the original formula. Used in `SatResult` and in debug mode when logging.
-  original_formula: &'a Formula,
   /// A reference to the node watcher.
   node_watcher: &'a W,
   /// The max depth for non-reducing splits. We use iterative deepening so this will be updated
   /// from time to time.
   non_reducing_max_depth: AtomicUsize,
   /// The root node where `SearchNode.compute()` already has been run.
-  root_node: SearchNode,
+  root_node: SearchNode<'a>,
   /// The splits from the root node.
   root_splits: Splits,
   /// The number of threads.
@@ -83,7 +81,7 @@ struct SearchTree<'a, W> {
   ///
   /// If `i` is not in `self.available_threads` or is in `self.busy_threads`,
   /// `self.posted_work[i]` is not initialized.
-  posted_work: [Mutex<Option<Arc<Branches>>>; AtomicBitSet::MAX as usize],
+  posted_work: [Mutex<Option<Arc<Branches<'a>>>>; AtomicBitSet::MAX as usize],
   /// If any thread founds a solution, it will be put in this mutex and `self.solution_condvar`
   /// will be notified.
   solution: Mutex<Option<Solution>>,
@@ -106,10 +104,9 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
     node_watcher: &'a W,
     n_threads: NonZero<u32>,
   ) -> ControlFlow<Solution, Self> {
-    let (root_node, root_splits) = SearchNode::new(formula.cnf.clone(), formula.var_names.len())
-      .compute(node_watcher, &formula)?;
+    let (root_node, root_splits) =
+      SearchNode::new(formula.cnf.clone(), formula).compute(node_watcher)?;
     Continue(Self {
-      original_formula: formula,
       node_watcher,
       non_reducing_max_depth: AtomicUsize::new(INITIAL_MAX_DEPTH),
       root_node,
@@ -153,7 +150,7 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
   }
 
   /// Get the branches for the root node.
-  fn get_root(&self) -> Arc<Branches> {
+  fn get_root(&self) -> Arc<Branches<'a>> {
     Branches::new(
       self.root_node.clone(),
       self.root_splits.clone(),
@@ -165,7 +162,7 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
   /// Given some branches in the search tree, try to post them to an idle thread.
   ///
   /// If no thread is idle, this method will return `Err(())` and the `Arc` will not be cloned.
-  fn try_post_work(&self, branches: &Arc<Branches>) -> Result<(), ()> {
+  fn try_post_work(&self, branches: &Arc<Branches<'a>>) -> Result<(), ()> {
     // Check if any thread is idle.
     let Some(index) =
       self

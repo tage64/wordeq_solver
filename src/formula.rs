@@ -36,6 +36,14 @@ pub struct Equation {
   pub rhs: Word,
 }
 
+/// A side in an equation, LHS or RHS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Side {
+  Lhs,
+  Rhs,
+}
+pub use Side::*;
+
 /// A clause in a conjunction.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Clause {
@@ -52,6 +60,27 @@ pub struct Cnf(pub VecList<Clause>);
 pub struct Formula {
   pub(crate) cnf: Cnf,
   pub(crate) var_names: Vec<CompactString>,
+}
+
+impl Equation {
+  /// Get a side of the equation.
+  pub fn side(&self, side: Side) -> &Word {
+    let Self { lhs, rhs } = self;
+    match side {
+      Lhs => lhs,
+      Rhs => rhs,
+    }
+  }
+}
+
+impl Side {
+  /// Get the other side.
+  pub fn opposite(self) -> Self {
+    match self {
+      Lhs => Rhs,
+      Rhs => Lhs,
+    }
+  }
 }
 
 impl Formula {

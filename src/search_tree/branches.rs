@@ -2,16 +2,16 @@ use std::ops::ControlFlow::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::*};
 
-use super::{SearchTree, Splits};
+use super::{SearchTree, SplitKind, Splits};
 use crate::*;
 
 /// A node in the search tree together with its branches.
 ///
 /// We keep track of which branches have been taken and which branches have been finished.
 #[derive(Debug)]
-pub struct Branches {
+pub struct Branches<'a> {
   /// The node from from which the branches are derived.
-  pub node: SearchNode,
+  pub node: SearchNode<'a>,
   /// The splits computed from `self.node`.
   pub splits: Splits,
   /// A set of all splits which have been taken by any thread. The elements are indices in the
@@ -37,7 +37,7 @@ pub struct Branches {
   pub reached_max_depth: AtomicBool,
   /// A `(parent_branch_idx, parent_branches)` pair where `parent_branch_idx` is the branch index of
   /// the node and `parent_branches` is the parent of `self.node` together with its branches.
-  pub parent: Option<(u32, Arc<Branches>)>,
+  pub parent: Option<(u32, Arc<Branches<'a>>)>,
 }
 
 /// A result from searching for a solution.
@@ -54,10 +54,10 @@ pub enum SearchResult {
 }
 use SearchResult::*;
 
-impl Branches {
+impl<'a> Branches<'a> {
   /// Create a new `Branches`.
   pub fn new(
-    node: SearchNode,
+    node: SearchNode<'a>,
     splits: Splits,
     non_reducing_max_depth: usize,
     parent: Option<(u32, Arc<Self>)>,
@@ -92,7 +92,7 @@ impl Branches {
   /// we don't want to overflow the stack and keep the stack size small for the worker threads.
   pub fn search<W: NodeWatcher>(
     mut self: Arc<Self>,
-    search_tree: &SearchTree<'_, W>,
+    search_tree: &SearchTree<'a, W>,
   ) -> SearchResult {
     loop {
       // Check if we should stop this thread because some other thread found a solution.
@@ -134,24 +134,15 @@ impl Branches {
             .taken_branches
             .contains_all_below(self.splits.len(), Acquire)
           {
-            let _ = search_tree.try_post_work(&self);
+            if let SplitKind::TwoVars(_, _) = &self.splits.kind {
+              let _ = search_tree.try_post_work(&self);
+            }
           }
           let mut node = self.node.clone();
           node.depth += 1;
           node.non_reducing_depth = non_reducing_depth;
           // Execute the branch / perform the split.
-          let (branch_var, replacement) = self.splits.get(branch_idx);
-          #[cfg(feature = "trace_logging")]
-          log::trace!(
-            "{:depth$}branching: {} = {}",
-            "",
-            &search_tree.original_formula.var_names[branch_var.id],
-            display_word(replacement.iter(), |x| &search_tree
-              .original_formula
-              .var_names[x.id]),
-            depth = node.depth,
-          );
-          node.fix_var(branch_var, replacement);
+          self.splits.fix_var(&mut node, branch_idx);
           break (node, branch_idx);
         } else {
           // All splits have been taken. If there are still threads working on splits, or if some
@@ -191,7 +182,7 @@ impl Branches {
         }
       };
       // Check if `node` is SAT, UNSAT, or create splits.
-      match node.compute(search_tree.node_watcher, search_tree.original_formula) {
+      match node.compute(search_tree.node_watcher) {
         Break(Unsat) => {
           self.finished_branches.add(branch_idx, AcqRel);
         }

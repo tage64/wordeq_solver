@@ -4,7 +4,7 @@ use std::ops::ControlFlow::{self, *};
 use bit_set::BitSet;
 use vec_map::VecMap;
 
-use super::Splits;
+use super::{SplitKind, Splits};
 use crate::vec_list::{Entry, ListPtr};
 use crate::*;
 
@@ -17,7 +17,7 @@ enum SimplificationResult {
   /// Unit propagation.
   UnitProp(UnitProp),
   /// Split on a variable at the start of LHS or RHS.
-  Split(Splits),
+  Split(SplitKind),
 }
 
 /// Describe if unit propagation happens at the LHS or RHS.
@@ -37,12 +37,11 @@ use UnitProp::*;
 
 /// A node in the search tree.
 #[derive(Debug, Clone)]
-pub struct SearchNode {
+pub struct SearchNode<'a> {
+  /// The original formula.
+  original_formula: &'a Formula,
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
   pub(super) formula: Cnf,
-  /// The number of variables.
-  #[allow(dead_code)]
-  no_vars: usize,
   /// assignments[x] = the value for variable with id x in the original formula.
   ///
   /// Note that the variable ids in the keys of this map corresponds to the variables in the
@@ -62,18 +61,18 @@ pub struct SearchNode {
   /// A set of pointers to all clauses which might have changed and should be checked.
   updated_clauses: BitSet,
   /// Splits is an ordered map with Splits as keys and clause indices as values.
-  splits: BTreeMap<Splits, ListPtr>,
+  splits: BTreeMap<SplitKind, ListPtr>,
   /// splits[c] = the splits for clause c.
-  splits_for_clause: VecMap<Splits>,
+  splits_for_clause: VecMap<SplitKind>,
   /// The number of nodes above this node in the search tree.
   pub(super) depth: usize,
   /// The number of non reducing edges above this node in the search tree.
   pub(super) non_reducing_depth: usize,
 }
 
-impl SearchNode {
-  pub(super) fn new(formula: Cnf, no_vars: usize) -> Self {
-    let mut var_ptrs = VecMap::with_capacity(no_vars);
+impl<'a> SearchNode<'a> {
+  pub(super) fn new(formula: Cnf, original_formula: &'a Formula) -> Self {
+    let mut var_ptrs = VecMap::with_capacity(original_formula.no_vars());
     for (clause_ptr, clause) in formula.0.iter() {
       for (term_ptr, term) in clause.equation.lhs.0.iter() {
         if let Term::Variable(var) = term {
@@ -100,8 +99,8 @@ impl SearchNode {
     }
     let updated_clauses = formula.0.iter().map(|(ptr, _)| ptr.to_usize()).collect();
     Self {
+      original_formula,
       formula,
-      no_vars,
       assignments: VecMap::new(),
       assignments_var_ptrs: VecMap::new(),
       var_ptrs,
@@ -117,7 +116,6 @@ impl SearchNode {
   pub(super) fn compute(
     mut self,
     node_watcher: &impl NodeWatcher,
-    original_formula: &Formula,
   ) -> ControlFlow<Solution, (Self, Splits)> {
     if node_watcher.visit_node(&self).is_break() {
       return Break(Cancelled);
@@ -126,7 +124,9 @@ impl SearchNode {
     log::trace!(
       "{:depth$}Solving formula: {}",
       "",
-      self.formula.display(|x| &original_formula.var_names[x.id]),
+      self
+        .formula
+        .display(|x| &self.original_formula.var_names[x.id]),
       depth = self.depth,
     );
     self.assert_invariants();
@@ -136,7 +136,9 @@ impl SearchNode {
     log::trace!(
       "{:depth$}After fix_point(): {}",
       "",
-      self.formula.display(|x| &original_formula.var_names[x.id]),
+      self
+        .formula
+        .display(|x| &self.original_formula.var_names[x.id]),
       depth = self.depth,
     );
     if let Err(()) = fix_point_res {
@@ -146,15 +148,15 @@ impl SearchNode {
       return Break(Unsat);
     }
     // Perform a split.
-    let Some((splits, clause_ptr)) = self.splits.pop_first() else {
+    let Some((split_kind, clause_ptr)) = self.splits.pop_first() else {
       // There are no splits so we've reached SAT!
       #[cfg(feature = "trace_logging")]
       log::trace!("SAT");
-      return Break(Sat(SatResult::new(original_formula.clone(), self)));
+      return Break(Sat(SatResult::new((*self.original_formula).clone(), self)));
       // TODO: set should_exit.
     };
-    let splits = splits.decide_order(&self);
     self.splits_for_clause.remove(clause_ptr.to_usize());
+    let splits = split_kind.create_splits(&self, clause_ptr);
     #[cfg(feature = "trace_logging")]
     log::trace!("{:depth$}New split;", "", depth = self.depth);
     Continue((self, splits))
@@ -164,7 +166,7 @@ impl SearchNode {
   fn assert_invariants(&self) {
     // Assert invariants related to self.var_ptrs and self.assignments.
     // Check that self.var_ptrs is sound.
-    for var in (0..self.no_vars).map(|id| Variable { id }) {
+    for var in (0..self.original_formula.no_vars()).map(|id| Variable { id }) {
       if self.var_ptrs.contains_key(var.id) {
         // Check that all pointers actually point to terms with var.
         for (clause_id, (lhs_ptrs, rhs_ptrs)) in &self.var_ptrs[var.id] {
@@ -267,11 +269,11 @@ impl SearchNode {
             self.remove_clause(clause_ptr);
           }
           SimplificationResult::UnitProp(x) => unit_propagations.push((clause_ptr, x)),
-          SimplificationResult::Split(splits) => {
-            if let Some(prev_clause) = self.splits.insert(splits.clone(), clause_ptr) {
+          SimplificationResult::Split(split) => {
+            if let Some(prev_clause) = self.splits.insert(split.clone(), clause_ptr) {
               self.splits_for_clause.remove(prev_clause.to_usize());
             }
-            self.splits_for_clause.insert(clause_ptr.to_usize(), splits);
+            self.splits_for_clause.insert(clause_ptr.to_usize(), split);
           }
         }
       }
@@ -522,7 +524,7 @@ impl SearchNode {
             // RHS is a single variable.
             return Ok(UnitProp(UnitPropRhs(*x)));
           } else {
-            return Ok(Split(Splits::EmptyOrTerminal(*x, a.clone())));
+            return Ok(Split(SplitKind::EmptyOrTerminal(*x, a.clone(), Side::Rhs)));
           }
         }
         (Some(Term::Variable(x)), Some(Term::Terminal(a))) => {
@@ -530,7 +532,7 @@ impl SearchNode {
             // LHS is a single variable.
             return Ok(UnitProp(UnitPropLhs(*x)));
           } else {
-            return Ok(Split(Splits::EmptyOrTerminal(*x, a.clone())));
+            return Ok(Split(SplitKind::EmptyOrTerminal(*x, a.clone(), Side::Lhs)));
           }
         }
         // Rule 8: Both sides starts with variables.
@@ -542,7 +544,7 @@ impl SearchNode {
             // RHS is a single variable.
             return Ok(UnitProp(UnitPropRhs(*y)));
           } else {
-            return Ok(Split(Splits::TwoVars(*x, *y)));
+            return Ok(Split(SplitKind::TwoVars(*x, *y)));
           }
         }
       };
@@ -584,6 +586,16 @@ impl SearchNode {
 
   /// Given a variable and a value, replace all occurences of that variable with the value.
   pub(super) fn fix_var(&mut self, var: Variable, val: impl IntoIterator<Item = Term> + Clone) {
+    #[cfg(feature = "trace_logging")]
+    log::trace!(
+      "{:depth$}fixing: {} = {}",
+      "",
+      &self.original_formula.var_names[var.id],
+      display_word(val.clone().into_iter().collect::<Vec<_>>().iter(), |x| {
+        &self.original_formula.var_names[x.id]
+      }),
+      depth = self.depth,
+    );
     for (clause_id, (lhs_ptrs, rhs_ptrs)) in self.var_ptrs.remove(var.id).unwrap().iter() {
       self.updated_clauses.insert(clause_id);
       if let Some(splits) = self.splits_for_clause.remove(clause_id) {
@@ -677,11 +689,11 @@ impl SearchNode {
   }
 
   /// Get an approximated list of the fields in this struct together with their dynamic sizes.
-  pub fn get_sizes(&self) -> [(&'static str, usize); 9] {
+  pub fn get_sizes(&self) -> [(&'static str, usize); 8] {
     [
       (
         "formula",
-        size_of::<SearchNode>()
+        size_of::<SearchNode<'_>>()
           + size_of::<Cnf>()
           + self
             .formula
@@ -693,7 +705,6 @@ impl SearchNode {
             })
             .sum::<usize>(),
       ),
-      ("no_vars", size_of::<usize>()),
       (
         "assignments",
         size_of::<VecMap<Word>>()
@@ -745,12 +756,12 @@ impl SearchNode {
       ),
       (
         "splits",
-        size_of::<BTreeMap<Splits, ListPtr>>()
-          + self.splits.len() * (size_of::<Splits>() + size_of::<ListPtr>()),
+        size_of::<BTreeMap<SplitKind, ListPtr>>()
+          + self.splits.len() * (size_of::<SplitKind>() + size_of::<ListPtr>()),
       ),
       (
         "splits_for_clause",
-        size_of::<VecMap<Splits>>() + self.splits_for_clause.capacity() * size_of::<Splits>(),
+        size_of::<VecMap<SplitKind>>() + self.splits_for_clause.capacity() * size_of::<SplitKind>(),
       ),
       ("last_static_items", size_of::<usize>() + size_of::<usize>()),
     ]
