@@ -231,27 +231,32 @@ fn is_first_last_var_test(
   let Term::Variable(other_side_last_var) = other_side.0.get(other_side.0.back().unwrap()) else {
     return false;
   };
-  var_only_once_on_one_side(node, clause_ptr, var, side)
-    && var_only_once_on_one_side(node, clause_ptr, *other_side_last_var, side.opposite())
+  var_only_on_one_side(node, clause_ptr, var, side).is_some_and(|occurences_1| {
+    var_only_on_one_side(node, clause_ptr, *other_side_last_var, side.opposite())
+      .is_some_and(|occurences_2| occurences_1 < 2 || occurences_2 < 2)
+  })
 }
 
-/// Check if a variable exists only once in the entire formula, and that is on the given side
-/// in the given clause.
-fn var_only_once_on_one_side(
+/// Check if a variable exists only on one side in a given equation in the entire formula. Returns
+/// the number of occurences in that side. If it occurs anywhere else in the formula None will be
+/// returned.
+#[inline]
+fn var_only_on_one_side(
   node: &SearchNode,
   clause_ptr: ListPtr,
   var: Variable,
   side: Side,
-) -> bool {
+) -> Option<usize> {
   let var_ptrs_for_clauses = &node.var_ptrs[var.id];
-  if var_ptrs_for_clauses.len() > 1 {
-    false
-  } else {
+  if var_ptrs_for_clauses.len() == 1 {
     let (lhs_ptrs, rhs_ptrs) = &var_ptrs_for_clauses[clause_ptr.to_usize()];
     let (var_ptrs_same_side, var_ptrs_other_side) = match side {
       Lhs => (lhs_ptrs, rhs_ptrs),
       Rhs => (rhs_ptrs, lhs_ptrs),
     };
-    var_ptrs_same_side.len() == 1 && var_ptrs_other_side.is_empty()
+    if var_ptrs_other_side.is_empty() {
+      return Some(var_ptrs_same_side.len());
+    }
   }
+  None
 }
