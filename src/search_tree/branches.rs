@@ -1,6 +1,9 @@
+use std::array;
 use std::ops::ControlFlow::*;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::*};
+use std::sync::{Arc, Mutex, Weak};
+
+use vec_map::VecMap;
 
 use super::{SearchTree, SplitKind, Splits};
 use crate::*;
@@ -9,14 +12,20 @@ use crate::*;
 ///
 /// We keep track of which branches have been taken and which branches have been finished.
 #[derive(Debug)]
-pub struct Branches<'a> {
+pub struct Branches<'a, W> {
   /// The node from from which the branches are derived.
-  pub node: SearchNode<'a>,
+  pub node: SearchNode<'a, W>,
   /// The splits computed from `self.node`.
   pub splits: Splits,
   /// A set of all splits which have been taken by any thread. The elements are indices in the
   /// range `0..self.splits.len()`.
   pub taken_branches: AtomicBitSet,
+  /// A list of the assigmment for a branch before running a fix point.
+  pub taken_branches_assignments:
+    Mutex<[Option<(VecMap<Word>, BranchStatus<'a, W>)>; AtomicBitSet::MAX as usize]>,
+  /// A set of the branches which have been taken and where the assignment has been set in
+  /// `self.branch_assignments`.
+  pub set_taken_branches_assignments: AtomicBitSet,
   /// A set of all splits where the search is finished.
   pub finished_branches: AtomicBitSet,
   /// Set to true iff one thread has backtracked to the parent.
@@ -37,7 +46,18 @@ pub struct Branches<'a> {
   pub reached_max_depth: AtomicBool,
   /// A `(parent_branch_idx, parent_branches)` pair where `parent_branch_idx` is the branch index of
   /// the node and `parent_branches` is the parent of `self.node` together with its branches.
-  pub parent: Option<(u32, Arc<Branches<'a>>)>,
+  pub parent: Option<(u32, Arc<Branches<'a, W>>)>,
+}
+
+/// A state for a taken branch.
+#[derive(Debug)]
+pub enum BranchStatus<'a, W> {
+  /// The branch is taken but we have no result.
+  Taken(Weak<Branches<'a, W>>),
+  /// The branch is finished but we have no result because we reached max depth.
+  ReachedMaxDepth,
+  /// The branch is proved UNSAT,
+  ProvedUnsat,
 }
 
 /// A result from searching for a solution.
@@ -54,10 +74,10 @@ pub enum SearchResult {
 }
 use SearchResult::*;
 
-impl<'a> Branches<'a> {
+impl<'a, W: NodeWatcher> Branches<'a, W> {
   /// Create a new `Branches`.
   pub fn new(
-    node: SearchNode<'a>,
+    node: SearchNode<'a, W>,
     splits: Splits,
     non_reducing_max_depth: usize,
     parent: Option<(u32, Arc<Self>)>,
@@ -68,6 +88,8 @@ impl<'a> Branches<'a> {
       non_reducing_max_depth,
       parent,
       taken_branches: AtomicBitSet::new(),
+      taken_branches_assignments: Mutex::new(array::from_fn(|_| None)),
+      set_taken_branches_assignments: AtomicBitSet::new(),
       finished_branches: AtomicBitSet::new(),
       has_backtracked: AtomicBool::new(false),
       reached_max_depth: AtomicBool::new(false),
@@ -90,10 +112,7 @@ impl<'a> Branches<'a> {
   /// This function is not recursive, but it is called recursively when it enters a new thread. And
   /// it could equally well be called recursively. We have chosen to make it non-recursive because
   /// we don't want to overflow the stack and keep the stack size small for the worker threads.
-  pub fn search<W: NodeWatcher>(
-    mut self: Arc<Self>,
-    search_tree: &SearchTree<'a, W>,
-  ) -> SearchResult {
+  pub fn search(mut self: Arc<Self>, search_tree: &SearchTree<'a, W>) -> SearchResult {
     loop {
       // Check if we should stop this thread because some other thread found a solution.
       if search_tree.should_exit_search.load(Acquire) {
@@ -165,9 +184,22 @@ impl<'a> Branches<'a> {
             };
             // If we reached max depth in any branch we should set `reached_max_depth = true` for the
             // parent.
+            let reached_max_depth = self.reached_max_depth.load(Acquire);
             parent_edge
               .reached_max_depth
-              .fetch_or(self.reached_max_depth.load(Acquire), AcqRel);
+              .fetch_or(reached_max_depth, AcqRel);
+            // Set taken_branches_assignments status.
+            parent_edge.taken_branches_assignments.lock().unwrap()[*parent_branch_idx as usize]
+              .as_mut()
+              .unwrap()
+              .1 = if reached_max_depth {
+              BranchStatus::ReachedMaxDepth
+            } else {
+              BranchStatus::ProvedUnsat
+            };
+            parent_edge
+              .set_taken_branches_assignments
+              .add(*parent_branch_idx, AcqRel);
             // Add `parent_branch_idx` to the parent's `finished_branches`.
             parent_edge
               .finished_branches
@@ -181,20 +213,34 @@ impl<'a> Branches<'a> {
           return DidntFinishSearch;
         }
       };
+      let assignments = node.assignments.clone();
       // Check if `node` is SAT, UNSAT, or create splits.
-      match node.compute(search_tree.node_watcher) {
-        Break(Unsat) => {
+      match node.compute(Some((branch_idx, self.clone()))) {
+        Break(x @ (Some(Unsat) | None)) => {
           self.finished_branches.add(branch_idx, AcqRel);
+          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] = Some((
+            assignments,
+            if x.is_some() {
+              BranchStatus::ProvedUnsat
+            } else {
+              BranchStatus::ReachedMaxDepth
+            },
+          ));
+          self.set_taken_branches_assignments.add(branch_idx, AcqRel);
         }
-        Break(x @ (Sat(_) | Cancelled)) => return ProvedSolution(x),
+        Break(Some(x @ (Sat(_) | Cancelled))) => return ProvedSolution(x),
         Continue((node, splits)) => {
           // Take this branch and go one step deeper in the tree.
-          self = Self::new(
+          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] =
+            Some((assignments, BranchStatus::Taken(Arc::downgrade(&self))));
+          self.set_taken_branches_assignments.add(branch_idx, AcqRel);
+          let child = Self::new(
             node,
             splits,
             self.non_reducing_max_depth,
             Some((branch_idx, self)),
           );
+          self = child;
         }
       }
     }

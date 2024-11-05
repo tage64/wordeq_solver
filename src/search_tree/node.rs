@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::ops::ControlFlow::{self, *};
+use std::sync::atomic::Ordering::*;
+use std::sync::{Arc, Weak};
 
 use bit_set::BitSet;
 use vec_map::VecMap;
 
-use super::{SplitKind, Splits};
+use super::{BranchStatus, Branches, SharedInfo, SplitKind, Splits};
 use crate::vec_list::{Entry, ListPtr};
 use crate::*;
 
@@ -36,10 +38,9 @@ enum UnitProp {
 use UnitProp::*;
 
 /// A node in the search tree.
-#[derive(Debug, Clone)]
-pub struct SearchNode<'a> {
-  /// The original formula.
-  original_formula: &'a Formula,
+#[derive(Debug)]
+pub struct SearchNode<'a, W> {
+  pub(super) shared_info: &'a SharedInfo<W>,
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
   pub(super) formula: Cnf,
   /// assignments[x] = the value for variable with id x in the original formula.
@@ -70,9 +71,9 @@ pub struct SearchNode<'a> {
   pub(super) non_reducing_depth: usize,
 }
 
-impl<'a> SearchNode<'a> {
-  pub(super) fn new(formula: Cnf, original_formula: &'a Formula) -> Self {
-    let mut var_ptrs = VecMap::with_capacity(original_formula.no_vars());
+impl<'a, W> SearchNode<'a, W> {
+  pub(super) fn new(formula: Cnf, shared_info: &'a SharedInfo<W>) -> Self {
+    let mut var_ptrs = VecMap::with_capacity(shared_info.original_formula.no_vars());
     for (clause_ptr, clause) in formula.0.iter() {
       for (term_ptr, term) in clause.equation.lhs.0.iter() {
         if let Term::Variable(var) = term {
@@ -99,7 +100,7 @@ impl<'a> SearchNode<'a> {
     }
     let updated_clauses = formula.0.iter().map(|(ptr, _)| ptr.to_usize()).collect();
     Self {
-      original_formula,
+      shared_info,
       formula,
       assignments: VecMap::new(),
       assignments_var_ptrs: VecMap::new(),
@@ -112,13 +113,21 @@ impl<'a> SearchNode<'a> {
     }
   }
 
-  /// Run the fix point function and return SAT, UNSAT or a set of splits.
+  /// Run the fix point function and return a solution, unknown or a set of splits.
+  ///
+  /// This function may return `Continue(node, splits)` if this node hasn't been explored before.
+  /// Or it may return `Break(Some(solution))` if a solution is found or if the node watcher tells
+  /// the search to cancel. It may also return `Break(None)` if we have visited this node earlier
+  /// with the same max depth, and that search led to no answer.
   pub(super) fn compute(
     mut self,
-    node_watcher: &impl NodeWatcher,
-  ) -> ControlFlow<Solution, (Self, Splits)> {
-    if node_watcher.visit_node(&self).is_break() {
-      return Break(Cancelled);
+    mut parent_branches: Option<(u32, Arc<Branches<'a, W>>)>,
+  ) -> ControlFlow<Option<Solution>, (Self, Splits)>
+  where
+    W: NodeWatcher,
+  {
+    if self.shared_info.node_watcher.visit_node(&self).is_break() {
+      return Break(Some(Cancelled));
     }
     #[cfg(feature = "trace_logging")]
     log::trace!(
@@ -126,7 +135,7 @@ impl<'a> SearchNode<'a> {
       "",
       self
         .formula
-        .display(|x| &self.original_formula.var_names[x.id]),
+        .display(|x| &self.shared_info.original_formula.var_names[x.id]),
       depth = self.depth,
     );
     self.assert_invariants();
@@ -138,21 +147,108 @@ impl<'a> SearchNode<'a> {
       "",
       self
         .formula
-        .display(|x| &self.original_formula.var_names[x.id]),
+        .display(|x| &self.shared_info.original_formula.var_names[x.id]),
       depth = self.depth,
     );
     if let Err(()) = fix_point_res {
       // This node is unsat.
       #[cfg(feature = "trace_logging")]
       log::trace!("{:1$}Unsatisfiable branch;", "", self.depth);
-      return Break(Unsat);
+      return Break(Some(Unsat));
+    }
+    // Check if this assignment has already been checked.
+    let mut branches_list: Vec<(u32, Weak<Branches<'a, W>>)> = Vec::new();
+    loop {
+      let (curr_branch_idx, parent_branches) = {
+        if let Some((branch_idx, branches)) = branches_list.pop() {
+          let Some(branches) = branches.upgrade() else {
+            continue;
+          };
+          (branch_idx, branches)
+        } else {
+          let Some((branch_idx, branches)) = parent_branches.take() else {
+            break;
+          };
+          parent_branches = branches.parent.clone();
+          (branch_idx, branches)
+        }
+      };
+      let mut next_branch = 0;
+      while let Some(branch_idx) = parent_branches
+        .set_taken_branches_assignments
+        .get_first_ge(next_branch, Acquire)
+      {
+        next_branch = branch_idx + 1;
+        if branch_idx == curr_branch_idx {
+          continue;
+        }
+        let taken_branches_assignments_lock =
+          parent_branches.taken_branches_assignments.lock().unwrap();
+        let (assignments, status) = taken_branches_assignments_lock[branch_idx as usize]
+          .as_ref()
+          .unwrap();
+        #[cfg(feature = "trace_logging")]
+        log::trace!(
+          "{:depth$}Comparing with: {}",
+          "",
+          self
+            .assignments
+            .iter()
+            .map(|(var_id, val)| format!(
+              "{} = {}",
+              &self.shared_info.original_formula.var_names[var_id],
+              display_word(val.0.iter().map(|(_, t)| t), |x| &self
+                .shared_info
+                .original_formula
+                .var_names[x.id])
+            ))
+            .fold(String::new(), |a, b| a + &b),
+          depth = self.depth,
+        );
+        // Check if `assignments` is a subset of `self.assignments`.
+        if assignments
+          .iter()
+          .all(|(var, val)| self.assignments.get(var) == Some(val))
+        {
+          match status {
+            BranchStatus::ProvedUnsat => {
+              #[cfg(feature = "trace_logging")]
+              log::trace!("{:1$}This branch is already proven UNSAT;", "", self.depth);
+              return Break(Some(Unsat));
+            }
+            BranchStatus::ReachedMaxDepth => {
+              #[cfg(feature = "trace_logging")]
+              log::trace!(
+                "{:1$}This assignment is already checked and will not find a result until max \
+                 depth.",
+                "",
+                self.depth
+              );
+              return Break(None);
+            }
+            BranchStatus::Taken(_) if branch_idx < curr_branch_idx => {
+              #[cfg(feature = "trace_logging")]
+              log::trace!(
+                "{:1$}Someone is already working on this set of assignments.",
+                "",
+                self.depth
+              );
+              return Break(None);
+            }
+            BranchStatus::Taken(child) => {
+              // We should go down into this child.
+              branches_list.push((branch_idx, child.clone()));
+            }
+          }
+        }
+      }
     }
     // Perform a split.
     let Some((split_kind, clause_ptr)) = self.splits.pop_first() else {
       // There are no splits so we've reached SAT!
       #[cfg(feature = "trace_logging")]
       log::trace!("SAT");
-      return Break(Sat(SatResult::new((*self.original_formula).clone(), self)));
+      return Break(Some(Sat(SatResult::new(self))));
       // TODO: set should_exit.
     };
     self.splits_for_clause.remove(clause_ptr.to_usize());
@@ -166,7 +262,7 @@ impl<'a> SearchNode<'a> {
   fn assert_invariants(&self) {
     // Assert invariants related to self.var_ptrs and self.assignments.
     // Check that self.var_ptrs is sound.
-    for var in (0..self.original_formula.no_vars()).map(|id| Variable { id }) {
+    for var in (0..self.shared_info.original_formula.no_vars()).map(|id| Variable { id }) {
       if self.var_ptrs.contains_key(var.id) {
         // Check that all pointers actually point to terms with var.
         for (clause_id, (lhs_ptrs, rhs_ptrs)) in &self.var_ptrs[var.id] {
@@ -590,9 +686,9 @@ impl<'a> SearchNode<'a> {
     log::trace!(
       "{:depth$}fixing: {} = {}",
       "",
-      &self.original_formula.var_names[var.id],
+      &self.shared_info.original_formula.var_names[var.id],
       display_word(val.clone().into_iter().collect::<Vec<_>>().iter(), |x| {
-        &self.original_formula.var_names[x.id]
+        &self.shared_info.original_formula.var_names[x.id]
       }),
       depth = self.depth,
     );
@@ -693,7 +789,7 @@ impl<'a> SearchNode<'a> {
     [
       (
         "formula",
-        size_of::<SearchNode<'_>>()
+        size_of::<Self>()
           + size_of::<Cnf>()
           + self
             .formula
@@ -765,5 +861,22 @@ impl<'a> SearchNode<'a> {
       ),
       ("last_static_items", size_of::<usize>() + size_of::<usize>()),
     ]
+  }
+}
+
+impl<'a, W> Clone for SearchNode<'a, W> {
+  fn clone(&self) -> Self {
+    Self {
+      shared_info: self.shared_info,
+      formula: self.formula.clone(),
+      assignments: self.assignments.clone(),
+      assignments_var_ptrs: self.assignments_var_ptrs.clone(),
+      var_ptrs: self.var_ptrs.clone(),
+      updated_clauses: self.updated_clauses.clone(),
+      splits: self.splits.clone(),
+      splits_for_clause: self.splits_for_clause.clone(),
+      depth: self.depth,
+      non_reducing_depth: self.non_reducing_depth,
+    }
   }
 }

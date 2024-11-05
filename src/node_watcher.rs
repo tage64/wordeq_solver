@@ -9,14 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::*;
 //use memory_stats::memory_stats;
 
-pub trait NodeWatcher: Send + Sync {
+pub trait NodeWatcher: Send + Sync + Sized {
   /// Type which the watcher should be converted to when it is finished.
   type Finished;
 
   /// This method should be called before each node. If it returns `ControlFlow::Break(())`, the
   /// search should exit with `Cancelled`. Note that this method may be called after it has
   /// returned `Break` due to multiple threads.
-  fn visit_node(&self, solver: &SearchNode) -> ControlFlow<()>;
+  fn visit_node(&self, solver: &SearchNode<Self>) -> ControlFlow<()>;
 
   /// Called when the search is finished.
   fn finish(self) -> Self::Finished;
@@ -28,7 +28,7 @@ pub fn watch_fn(f: impl Fn() -> ControlFlow<()> + Send + Sync) -> impl NodeWatch
   impl<F: Fn() -> ControlFlow<()> + Send + Sync> NodeWatcher for Watcher<F> {
     type Finished = ();
     #[inline]
-    fn visit_node(&self, _: &SearchNode) -> ControlFlow<()> {
+    fn visit_node(&self, _: &SearchNode<Self>) -> ControlFlow<()> {
       (self.0)()
     }
     fn finish(self) -> () {}
@@ -57,7 +57,7 @@ impl Timeout {
 
 impl NodeWatcher for Timeout {
   type Finished = ();
-  fn visit_node(&self, _: &SearchNode) -> ControlFlow<()> {
+  fn visit_node(&self, _: &SearchNode<Self>) -> ControlFlow<()> {
     if self.start.elapsed() > self.timeout {
       ControlFlow::Break(())
     } else {
@@ -147,7 +147,7 @@ impl CollectNodeStats {
 impl NodeWatcher for CollectNodeStats {
   type Finished = NodeStats;
 
-  fn visit_node(&self, solver: &SearchNode) -> ControlFlow<()> {
+  fn visit_node(&self, solver: &SearchNode<Self>) -> ControlFlow<()> {
     let running_time = self.start.elapsed();
     if 0 == self.node_count.fetch_add(1, Ordering::Relaxed) {
       let _ = self.startup_time.set(running_time);

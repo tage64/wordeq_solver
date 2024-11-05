@@ -37,7 +37,7 @@ pub struct Splits {
 
 impl SplitKind {
   /// Generate splits from this split kind.
-  pub fn create_splits(self, node: &SearchNode, clause_ptr: ListPtr) -> Splits {
+  pub fn create_splits<W>(self, node: &SearchNode<W>, clause_ptr: ListPtr) -> Splits {
     /* TODO: This is too slow.
       let reversed = match &self {
         EmptyOrTerminal(_, _, _) => false,
@@ -120,7 +120,7 @@ impl Splits {
   }
 
   /// Given a branch index, check whether the split will be a reducing split or not.
-  pub fn is_reducing(&self, mut n: u32, solver: &SearchNode) -> bool {
+  pub fn is_reducing<W>(&self, mut n: u32, solver: &SearchNode<W>) -> bool {
     if self.first_last_var_test.is_some() {
       if n == 0 {
         return true;
@@ -146,7 +146,7 @@ impl Splits {
   ///
   /// Returns a `(variable, assignment)` pair where `variable` is the variable to be
   /// assigned and `assignment` is the terms to assign to the variable.
-  pub fn fix_var(&self, node: &mut SearchNode, mut n: u32) {
+  pub fn fix_var<W>(&self, node: &mut SearchNode<W>, mut n: u32) {
     if let Some(side) = self.first_last_var_test {
       if n == 0 {
         let other_side = node
@@ -215,8 +215,8 @@ fn guess_word_len(word: &Word) -> usize {
 
 /// Check if the variable occurs only once and that another variable occurs only once as last term
 /// in the other side of the clause.
-fn is_first_last_var_test(
-  node: &SearchNode,
+fn is_first_last_var_test<W>(
+  node: &SearchNode<W>,
   clause_ptr: ListPtr,
   var: Variable,
   side: Side,
@@ -241,8 +241,8 @@ fn is_first_last_var_test(
 /// the number of occurences in that side. If it occurs anywhere else in the formula None will be
 /// returned.
 #[inline]
-fn var_only_on_one_side(
-  node: &SearchNode,
+fn var_only_on_one_side<W>(
+  node: &SearchNode<W>,
   clause_ptr: ListPtr,
   var: Variable,
   side: Side,

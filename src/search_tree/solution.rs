@@ -57,10 +57,10 @@ impl Solution {
 }
 
 impl SatResult {
-  pub(super) fn new(original_formula: Formula, solver: SearchNode) -> Self {
+  pub(super) fn new<W>(node: SearchNode<W>) -> Self {
     Self {
-      formula: original_formula,
-      assignments: solver.assignments,
+      formula: node.shared_info.original_formula.clone(),
+      assignments: node.assignments,
       cached_assignments: RefCell::new(VecMap::new()),
       substituted_formula: OnceCell::new(),
     }

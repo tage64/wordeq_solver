@@ -22,7 +22,7 @@ memory-stats = "1.2.0"
 nonmax = { version = "0.5.5", features = ["serde"] }
 pest = "2.7.14"
 pest_derive = "2.7.14"
-rand = { version = "0.8.5", default-features = false }
+rand = { version = "0.8.5", default-features = false, features = ["std"] }
 rand_xoshiro = "0.6.0"
 serde = { version = "1.0.210", features = ["derive"] }
 vec_map = { version = "0.8.2", features = ["serde"] }

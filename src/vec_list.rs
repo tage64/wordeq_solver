@@ -1,5 +1,6 @@
 //! An implementation of a doubly linked list where all items are stored in a `Vec`.
 
+use std::fmt;
 use std::mem;
 
 use nonmax::NonMaxUsize;
@@ -43,7 +44,7 @@ pub(crate) enum Entry<T> {
   },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VecList<T> {
   entries: Vec<Entry<T>>,
   head: Option<ListPtr>,
@@ -334,6 +335,19 @@ impl<T> FromIterator<T> for VecList<T> {
 impl<T> Default for VecList<T> {
   fn default() -> Self {
     VecList::new()
+  }
+}
+
+impl<T: fmt::Debug> fmt::Debug for VecList<T> {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    write!(f, "[")?;
+    for (ptr, x) in self.iter() {
+      write!(f, "{x:?}")?;
+      if Some(ptr) != self.back() {
+        write!(f, ", ")?;
+      }
+    }
+    write!(f, "]")
   }
 }
 

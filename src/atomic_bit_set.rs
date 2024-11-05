@@ -36,6 +36,19 @@ impl AtomicBitSet {
     self.0.load(order).trailing_ones() >= below
   }
 
+  /// Get the first member >= a certain number if any.
+  pub fn get_first_ge(&self, lower_bound: u32, order: Ordering) -> Option<u32> {
+    if lower_bound >= Self::MAX {
+      return None;
+    }
+    let x = self.0.load(order) >> lower_bound;
+    if x == 0 {
+      None
+    } else {
+      Some(x.trailing_zeros() + lower_bound)
+    }
+  }
+
   /// Set the smallest integer in the range 0..n which is not currently in the set. Returns the
   /// integer on success or None if the range was all set. `below` must be in the range
   /// `0..=Self::MAX`.
@@ -96,17 +109,28 @@ mod tests {
   }
 
   #[test]
-  fn test_atomic_bit_set_contains_all_below() {
+  fn test_atomic_bit_set_contains_all_below_and_get_first_ge() {
     let bitset = AtomicBitSet::new();
     assert!(bitset.contains_all_below(0, Relaxed));
+    assert!(bitset.get_first_ge(0, Relaxed).is_none());
+    assert!(bitset.get_first_ge(AtomicBitSet::MAX, Relaxed).is_none());
+    assert!(bitset.get_first_ge(1000, Relaxed).is_none());
     assert!(!bitset.contains_all_below(1, Relaxed));
     assert!(!bitset.contains_all_below(AtomicBitSet::MAX, Relaxed));
     bitset.add(2, Relaxed);
     assert!(bitset.contains_all_below(0, Relaxed));
+    assert_eq!(Some(2), bitset.get_first_ge(0, Relaxed));
+    assert_eq!(Some(2), bitset.get_first_ge(1, Relaxed));
+    assert_eq!(Some(2), bitset.get_first_ge(2, Relaxed));
+    assert_eq!(None, bitset.get_first_ge(3, Relaxed));
+    assert_eq!(None, bitset.get_first_ge(AtomicBitSet::MAX - 1, Relaxed));
+    assert_eq!(None, bitset.get_first_ge(AtomicBitSet::MAX, Relaxed));
     for i in 1..5 {
       assert!(!bitset.contains_all_below(i, Relaxed));
     }
     bitset.add(0, Relaxed);
+    assert_eq!(Some(0), bitset.get_first_ge(0, Relaxed));
+    assert_eq!(Some(2), bitset.get_first_ge(1, Relaxed));
     assert!(bitset.contains_all_below(0, Relaxed));
     assert!(bitset.contains_all_below(1, Relaxed));
     for i in 2..5 {
