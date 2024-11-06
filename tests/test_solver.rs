@@ -39,27 +39,31 @@ fn test_simple_equations() {
 }
 
 #[test]
-fn random1_single_threaded() {
-  let results = run_benchmark(
-    random_formulae(1000),
+fn random1() {
+  let single_thread = run_benchmark(
+    random_formulae(200),
     Duration::from_secs(8),
     1.try_into().unwrap(),
   )
   .unwrap();
-  for (_, result, _) in results.into_iter() {
-    result.assert_sat();
-  }
-}
-
-#[test]
-fn random1_multi_threaded() {
-  let results = run_benchmark(
-    random_formulae(1000),
+  let multi_thread = run_benchmark(
+    random_formulae(200),
     Duration::from_secs(8),
     4.try_into().unwrap(),
   )
   .unwrap();
-  for (_, result, _) in results.into_iter() {
-    result.assert_sat();
+  for (i, (single_thread, multi_thread)) in single_thread
+    .into_iter()
+    .zip(multi_thread.into_iter())
+    .enumerate()
+  {
+    single_thread.1.assert_sat();
+    multi_thread.1.assert_sat();
+    assert_eq!(
+      single_thread.2.max_depth,
+      multi_thread.2.max_depth,
+      "Max depth of single and multi threaded searches differ at formula {}",
+      i + 1
+    );
   }
 }

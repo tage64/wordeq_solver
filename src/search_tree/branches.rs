@@ -1,11 +1,10 @@
 use std::array;
-use std::ops::ControlFlow::*;
 use std::sync::atomic::{AtomicBool, Ordering::*};
 use std::sync::{Arc, Mutex, Weak};
 
 use vec_map::VecMap;
 
-use super::{SearchTree, SplitKind, Splits};
+use super::{ComputeResult::*, SearchTree, SplitKind, Splits};
 use crate::*;
 
 /// A node in the search tree together with its branches.
@@ -216,30 +215,29 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
       let assignments = node.assignments.clone();
       // Check if `node` is SAT, UNSAT, or create splits.
       match node.compute(Some((branch_idx, self.clone()))) {
-        Break(x @ (Some(Unsat) | None)) => {
+        x @ (FoundSolution(Unsat) | WillReachMaxDepth | TakenAssignments) => {
           self.finished_branches.add(branch_idx, AcqRel);
-          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] = Some((
-            assignments,
-            if x.is_some() {
-              BranchStatus::ProvedUnsat
-            } else {
-              BranchStatus::ReachedMaxDepth
-            },
-          ));
+          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] =
+            Some((assignments, match x {
+              FoundSolution(Unsat) => BranchStatus::ProvedUnsat,
+              WillReachMaxDepth => BranchStatus::ReachedMaxDepth,
+              TakenAssignments => BranchStatus::Taken(Weak::new()),
+              _ => unreachable!(),
+            }));
           self.set_taken_branches_assignments.add(branch_idx, AcqRel);
         }
-        Break(Some(x @ (Sat(_) | Cancelled))) => return ProvedSolution(x),
-        Continue((node, splits)) => {
+        FoundSolution(x) => return ProvedSolution(x),
+        Split(node, splits) => {
           // Take this branch and go one step deeper in the tree.
-          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] =
-            Some((assignments, BranchStatus::Taken(Arc::downgrade(&self))));
-          self.set_taken_branches_assignments.add(branch_idx, AcqRel);
           let child = Self::new(
             node,
             splits,
             self.non_reducing_max_depth,
-            Some((branch_idx, self)),
+            Some((branch_idx, self.clone())),
           );
+          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] =
+            Some((assignments, BranchStatus::Taken(Arc::downgrade(&child))));
+          self.set_taken_branches_assignments.add(branch_idx, AcqRel);
           self = child;
         }
       }

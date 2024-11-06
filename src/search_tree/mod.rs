@@ -1,4 +1,3 @@
-mod assignment_cache;
 mod branches;
 mod node;
 pub mod solution;
@@ -8,11 +7,11 @@ use std::hint;
 use std::num::NonZero;
 use std::ops::ControlFlow::{self, *};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::*};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use assignment_cache::AssignmentCache;
 use branches::{BranchStatus, Branches, SearchResult::*};
+use node::ComputeResult::{self, *};
 pub use node::SearchNode;
 use splits::{SplitKind, Splits};
 
@@ -51,11 +50,6 @@ struct SharedInfo<W> {
   /// The original formula which we are trying to solve.
   original_formula: Formula,
   node_watcher: W,
-  /// A cache for assignments which we have proved lead to UNSAT.
-  proved_unsat: RwLock<AssignmentCache>,
-  /// A cache for assignment which we know that they don't have a solution until the current max
-  /// depth.
-  unknown_till_max_depth: RwLock<AssignmentCache>,
 }
 
 impl<W> SharedInfo<W> {
@@ -63,8 +57,6 @@ impl<W> SharedInfo<W> {
     Self {
       original_formula: formula,
       node_watcher,
-      proved_unsat: RwLock::new(AssignmentCache::new()),
-      unknown_till_max_depth: RwLock::new(AssignmentCache::new()),
     }
   }
 }
@@ -130,10 +122,15 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
     shared_info: &'a SharedInfo<W>,
     n_threads: NonZero<u32>,
   ) -> ControlFlow<Solution, Self> {
+    shared_info
+      .node_watcher
+      .increase_max_depth(INITIAL_MAX_DEPTH);
     let (root_node, root_splits) =
-      SearchNode::new(shared_info.original_formula.cnf.clone(), shared_info)
-        .compute(None)
-        .map_break(Option::unwrap)?;
+      match SearchNode::new(shared_info.original_formula.cnf.clone(), shared_info).compute(None) {
+        FoundSolution(x) => return Break(x),
+        Split(x, y) => (x, y),
+        _ => unreachable!(),
+      };
     Continue(Self {
       shared_info,
       non_reducing_max_depth: AtomicUsize::new(INITIAL_MAX_DEPTH),
@@ -254,6 +251,10 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
             self
               .non_reducing_max_depth
               .fetch_add(MAX_DEPTH_STEP, AcqRel);
+            self
+              .shared_info
+              .node_watcher
+              .increase_max_depth(self.non_reducing_max_depth.load(Acquire));
             #[cfg(feature = "trace_logging")]
             log::trace!(
               "Thread {} increased max depth to {}",
@@ -277,4 +278,16 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
       }
     }
   }
+}
+
+#[macro_export]
+macro_rules! trace_log {
+  ($node:expr, $fmtstr:literal $(, $arg:expr)*$(,)?) => {
+    #[cfg(feature = "trace_logging")]
+    log::trace!(
+      concat!("{thread_name}: {:depth$}", $fmtstr),
+      "" $(, $arg)*, depth = $node.depth,
+      thread_name = std::thread::current().name().unwrap_or_default()
+    );
+  };
 }

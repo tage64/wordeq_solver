@@ -1,14 +1,29 @@
 use std::collections::BTreeMap;
-use std::ops::ControlFlow::{self, *};
+#[allow(unused_imports)]
+use std::iter;
 use std::sync::atomic::Ordering::*;
 use std::sync::{Arc, Weak};
 
 use bit_set::BitSet;
 use vec_map::VecMap;
 
-use super::{BranchStatus, Branches, SharedInfo, SplitKind, Splits};
+use super::{BranchStatus, Branches, SharedInfo, SplitKind, Splits, trace_log};
 use crate::vec_list::{Entry, ListPtr};
 use crate::*;
+
+/// A result returned from the compute method on a search node.
+#[derive(Debug)]
+pub enum ComputeResult<'a, W> {
+  /// A solution is found for this branch.
+  FoundSolution(Solution),
+  /// Taking this branch will not find a solution under the current max depth.
+  WillReachMaxDepth,
+  /// Some other branch is already working on this.
+  TakenAssignments,
+  /// We should examine the following splits from the node.
+  Split(SearchNode<'a, W>, Splits),
+}
+use ComputeResult::*;
 
 /// A result returned from the simplify_clause function.
 #[derive(Debug, Clone)]
@@ -122,55 +137,60 @@ impl<'a, W> SearchNode<'a, W> {
   pub(super) fn compute(
     mut self,
     mut parent_branches: Option<(u32, Arc<Branches<'a, W>>)>,
-  ) -> ControlFlow<Option<Solution>, (Self, Splits)>
+  ) -> ComputeResult<'a, W>
   where
     W: NodeWatcher,
   {
     if self.shared_info.node_watcher.visit_node(&self).is_break() {
-      return Break(Some(Cancelled));
+      return FoundSolution(Cancelled);
     }
-    #[cfg(feature = "trace_logging")]
-    log::trace!(
-      "{:depth$}Solving formula: {}",
-      "",
+    trace_log!(
+      self,
+      "Solving formula: {}",
       self
         .formula
         .display(|x| &self.shared_info.original_formula.var_names[x.id]),
-      depth = self.depth,
     );
     self.assert_invariants();
     // Run the fix point function.
     let fix_point_res = self.fix_point();
-    #[cfg(feature = "trace_logging")]
-    log::trace!(
-      "{:depth$}After fix_point(): {}",
-      "",
+    trace_log!(
+      self,
+      "After fix_point(): {}",
       self
         .formula
         .display(|x| &self.shared_info.original_formula.var_names[x.id]),
-      depth = self.depth,
     );
     if let Err(()) = fix_point_res {
       // This node is unsat.
-      #[cfg(feature = "trace_logging")]
-      log::trace!("{:1$}Unsatisfiable branch;", "", self.depth);
-      return Break(Some(Unsat));
+      trace_log!(self, "Unsatisfiable branch;");
+      return FoundSolution(Unsat);
     }
+    // Perform a split.
+    let Some((split_kind, clause_ptr)) = self.splits.pop_first() else {
+      // There are no splits so we've reached SAT!
+      trace_log!(self, "SAT");
+      return FoundSolution(Sat(SatResult::new(self)));
+      // TODO: set should_exit.
+    };
     // Check if this assignment has already been checked.
     let mut branches_list: Vec<(u32, Weak<Branches<'a, W>>)> = Vec::new();
     loop {
-      let (curr_branch_idx, parent_branches) = {
+      let (curr_branch_idx, parent_branches, is_before) = {
         if let Some((branch_idx, branches)) = branches_list.pop() {
+          trace_log!(self, "Checking into a taken branch.");
           let Some(branches) = branches.upgrade() else {
+            trace_log!(self, "The taken branch has been removed.");
             continue;
           };
-          (branch_idx, branches)
+          (branch_idx, branches, Some(false))
         } else {
           let Some((branch_idx, branches)) = parent_branches.take() else {
             break;
           };
+          trace_log!(self, "Checking the parent.");
           parent_branches = branches.parent.clone();
-          (branch_idx, branches)
+          (branch_idx, branches, None)
         }
       };
       let mut next_branch = 0;
@@ -187,12 +207,16 @@ impl<'a, W> SearchNode<'a, W> {
         let (assignments, status) = taken_branches_assignments_lock[branch_idx as usize]
           .as_ref()
           .unwrap();
-        #[cfg(feature = "trace_logging")]
-        log::trace!(
-          "{:depth$}Comparing with: {}",
-          "",
-          self
-            .assignments
+        trace_log!(
+          self,
+          "Comparing with: {:?}: {}",
+          iter::successors(
+            Some((branch_idx, parent_branches.clone())),
+            |(_, parent_branches)| parent_branches.parent.clone()
+          )
+          .map(|(i, _)| i)
+          .collect::<Vec<_>>(),
+          assignments
             .iter()
             .map(|(var_id, val)| format!(
               "{} = {}",
@@ -202,60 +226,46 @@ impl<'a, W> SearchNode<'a, W> {
                 .original_formula
                 .var_names[x.id])
             ))
-            .fold(String::new(), |a, b| a + &b),
-          depth = self.depth,
+            .fold(String::new(), |a, b| a + " " + &b),
         );
         // Check if `assignments` is a subset of `self.assignments`.
         if assignments
           .iter()
           .all(|(var, val)| self.assignments.get(var) == Some(val))
         {
+          let is_before = is_before.unwrap_or(branch_idx < curr_branch_idx);
           match status {
             BranchStatus::ProvedUnsat => {
-              #[cfg(feature = "trace_logging")]
-              log::trace!("{:1$}This branch is already proven UNSAT;", "", self.depth);
-              return Break(Some(Unsat));
+              trace_log!(self, "This branch is already proven UNSAT;");
+              return FoundSolution(Unsat);
             }
             BranchStatus::ReachedMaxDepth => {
-              #[cfg(feature = "trace_logging")]
-              log::trace!(
-                "{:1$}This assignment is already checked and will not find a result until max \
-                 depth.",
-                "",
-                self.depth
+              trace_log!(
+                self,
+                "This assignment is already checked and will not find a result until max depth.",
               );
-              return Break(None);
+              return WillReachMaxDepth;
             }
-            BranchStatus::Taken(_) if branch_idx < curr_branch_idx => {
-              #[cfg(feature = "trace_logging")]
-              log::trace!(
-                "{:1$}Someone is already working on this set of assignments.",
-                "",
-                self.depth
+            BranchStatus::Taken(_) if is_before => {
+              trace_log!(
+                self,
+                "Someone is already working on this set of assignments.",
               );
-              return Break(None);
+              return TakenAssignments;
             }
             BranchStatus::Taken(child) => {
               // We should go down into this child.
+              trace_log!(self, "Pushing a taken branch to check.");
               branches_list.push((branch_idx, child.clone()));
             }
           }
         }
       }
     }
-    // Perform a split.
-    let Some((split_kind, clause_ptr)) = self.splits.pop_first() else {
-      // There are no splits so we've reached SAT!
-      #[cfg(feature = "trace_logging")]
-      log::trace!("SAT");
-      return Break(Some(Sat(SatResult::new(self))));
-      // TODO: set should_exit.
-    };
     self.splits_for_clause.remove(clause_ptr.to_usize());
     let splits = split_kind.create_splits(&self, clause_ptr);
-    #[cfg(feature = "trace_logging")]
-    log::trace!("{:depth$}New split;", "", depth = self.depth);
-    Continue((self, splits))
+    trace_log!(self, "New split;");
+    Split(self, splits)
   }
 
   #[cfg(debug_assertions)]
@@ -682,15 +692,13 @@ impl<'a, W> SearchNode<'a, W> {
 
   /// Given a variable and a value, replace all occurences of that variable with the value.
   pub(super) fn fix_var(&mut self, var: Variable, val: impl IntoIterator<Item = Term> + Clone) {
-    #[cfg(feature = "trace_logging")]
-    log::trace!(
-      "{:depth$}fixing: {} = {}",
-      "",
+    trace_log!(
+      self,
+      "fixing: {} = {}",
       &self.shared_info.original_formula.var_names[var.id],
       display_word(val.clone().into_iter().collect::<Vec<_>>().iter(), |x| {
         &self.shared_info.original_formula.var_names[x.id]
       }),
-      depth = self.depth,
     );
     for (clause_id, (lhs_ptrs, rhs_ptrs)) in self.var_ptrs.remove(var.id).unwrap().iter() {
       self.updated_clauses.insert(clause_id);

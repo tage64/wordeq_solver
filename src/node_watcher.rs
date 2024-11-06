@@ -18,6 +18,10 @@ pub trait NodeWatcher: Send + Sync + Sized {
   /// returned `Break` due to multiple threads.
   fn visit_node(&self, solver: &SearchNode<Self>) -> ControlFlow<()>;
 
+  /// Call this each time the max depth is updated, including at the beginning. Will only be called
+  /// with successively larger values.
+  fn increase_max_depth(&self, _max_depth: usize) {}
+
   /// Called when the search is finished.
   fn finish(self) -> Self::Finished;
 }
@@ -70,10 +74,11 @@ impl NodeWatcher for Timeout {
 /// Statistics about a search. Retrieved from the `CollectNodeStats` watcher.
 #[derive(Debug, Clone, Display, Serialize, Deserialize)]
 #[display(
-  "{node_count} nodes in {}. Mean node time: {}, startup time {}.",
+  "{node_count} nodes in {}. Mean node time: {}, startup time {}, max depth: {}.",
   format_duration(self.total_time()),
   format_duration(self.search_time/self.node_count.try_into().unwrap()),
   format_duration(self.startup_time),
+  self.max_depth,
 )]
 pub struct NodeStats {
   /// The number of visited nodes.
@@ -84,6 +89,7 @@ pub struct NodeStats {
   pub startup_time: Duration,
   /// The time from the first node to till the search was finished.
   pub search_time: Duration,
+  pub max_depth: usize,
   // Some out commented features follow.
   //pub max_physical_mem: f64,
   //pub max_virtual_mem: f64,
@@ -100,6 +106,7 @@ pub struct CollectNodeStats {
   node_count: AtomicUsize,
   /// The time between the start and the first visited node.
   startup_time: OnceLock<Duration>,
+  max_depth: AtomicUsize,
   last_print_time: Mutex<Instant>,
   print_interval: Option<Duration>,
   // Out commented feature:
@@ -137,6 +144,7 @@ impl CollectNodeStats {
       start,
       timeout,
       node_count: AtomicUsize::new(0),
+      max_depth: AtomicUsize::new(0),
       startup_time: OnceLock::new(),
       last_print_time: Mutex::new(start),
       print_interval: print_stats_interval,
@@ -176,6 +184,10 @@ impl NodeWatcher for CollectNodeStats {
     }
   }
 
+  fn increase_max_depth(&self, max_depth: usize) {
+    self.max_depth.store(max_depth, Ordering::Relaxed);
+  }
+
   fn finish(self) -> NodeStats {
     let startup_time = *self.startup_time.get().unwrap();
     let search_time = self.start.elapsed() - startup_time;
@@ -184,6 +196,7 @@ impl NodeWatcher for CollectNodeStats {
       search_time,
       startup_time,
       node_count: self.node_count.into_inner(),
+      max_depth: self.max_depth.into_inner(),
       //max_physical_mem,
       //max_virtual_mem,
     }
