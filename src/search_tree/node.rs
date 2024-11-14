@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 #[allow(unused_imports)]
 use std::iter;
 use std::sync::atomic::Ordering::*;
 use std::sync::{Arc, Weak};
 
 use bit_set::BitSet;
+use rustc_hash::FxHashMap;
 use vec_map::VecMap;
 
 use super::{BranchStatus, Branches, SharedInfo, SplitKind, Splits, trace_log};
@@ -52,6 +54,30 @@ enum UnitProp {
 }
 use UnitProp::*;
 
+/// A wrapper type around `Weak` to allow it to be hashed by the pointer value and eq by pointer
+/// equality.
+#[derive(Debug)]
+struct ArcPtrHash<T>(Weak<T>);
+
+impl<T> Clone for ArcPtrHash<T> {
+  fn clone(&self) -> Self {
+    ArcPtrHash(self.0.clone())
+  }
+}
+
+impl<T> PartialEq for ArcPtrHash<T> {
+  fn eq(&self, other: &Self) -> bool {
+    self.0.ptr_eq(&other.0)
+  }
+}
+impl<T> Eq for ArcPtrHash<T> {}
+
+impl<T> Hash for ArcPtrHash<T> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.0.as_ptr().hash(state)
+  }
+}
+
 /// A node in the search tree.
 #[derive(Debug)]
 pub struct SearchNode<'a, W> {
@@ -84,6 +110,7 @@ pub struct SearchNode<'a, W> {
   pub(super) depth: usize,
   /// The number of non reducing edges above this node in the search tree.
   pub(super) non_reducing_depth: usize,
+  disjunct_nodes: FxHashMap<ArcPtrHash<Branches<'a, W>>, BitSetUsize>,
 }
 
 impl<'a, W> SearchNode<'a, W> {
@@ -125,6 +152,7 @@ impl<'a, W> SearchNode<'a, W> {
       splits_for_clause: VecMap::new(),
       depth: 0,
       non_reducing_depth: 0,
+      disjunct_nodes: FxHashMap::default(),
     }
   }
 
@@ -174,39 +202,53 @@ impl<'a, W> SearchNode<'a, W> {
       // TODO: set should_exit.
     };
     // Check if this assignment has already been checked.
-    let mut branches_list: Vec<(u32, Weak<Branches<'a, W>>)> = Vec::new();
+    let mut branches_list: Vec<Weak<Branches<'a, W>>> = Vec::new();
     loop {
-      let (curr_branch_idx, parent_branches, is_before) = {
-        if let Some((branch_idx, branches)) = branches_list.pop() {
+      let (maybe_curr_branch_idx, parent_branches) = {
+        if let Some(branches) = branches_list.pop() {
           trace_log!(self, "Checking into a taken branch.");
           let Some(branches) = branches.upgrade() else {
             trace_log!(self, "The taken branch has been removed.");
             continue;
           };
-          (branch_idx, branches, Some(false))
+          (None, branches)
         } else {
           let Some((branch_idx, branches)) = parent_branches.take() else {
             break;
           };
           trace_log!(self, "Checking the parent.");
           parent_branches = branches.parent.clone();
-          (branch_idx, branches, None)
+          (Some(branch_idx), branches)
         }
       };
+      let disjunct_branches = self
+        .disjunct_nodes
+        .entry(ArcPtrHash(Arc::downgrade(&parent_branches)))
+        .or_insert(BitSetUsize::empty());
+      if let Some(curr_branch_idx) = maybe_curr_branch_idx {
+        disjunct_branches.add(curr_branch_idx);
+      }
       let mut next_branch = 0;
       while let Some(branch_idx) = parent_branches
         .set_taken_branches_assignments
         .get_first_ge(next_branch, Acquire)
       {
         next_branch = branch_idx + 1;
-        if branch_idx == curr_branch_idx {
+        if disjunct_branches.contains(branch_idx) {
           continue;
         }
         let taken_branches_assignments_lock =
           parent_branches.taken_branches_assignments.lock().unwrap();
-        let (assignments, status) = taken_branches_assignments_lock[branch_idx as usize]
+        let (assignments, status, possibly_overlapping_branches) = taken_branches_assignments_lock
+          [branch_idx as usize]
           .as_ref()
           .unwrap();
+        if let Some(curr_branch_idx) = maybe_curr_branch_idx {
+          disjunct_branches.add_all(possibly_overlapping_branches.clone().complement());
+          if disjunct_branches.contains(curr_branch_idx) {
+            continue;
+          }
+        }
         trace_log!(
           self,
           "Comparing with: {:?}: {}",
@@ -233,7 +275,6 @@ impl<'a, W> SearchNode<'a, W> {
           .iter()
           .all(|(var, val)| self.assignments.get(var) == Some(val))
         {
-          let is_before = is_before.unwrap_or(branch_idx < curr_branch_idx);
           match status {
             BranchStatus::ProvedUnsat => {
               trace_log!(self, "This branch is already proven UNSAT;");
@@ -246,7 +287,11 @@ impl<'a, W> SearchNode<'a, W> {
               );
               return WillReachMaxDepth;
             }
-            BranchStatus::Taken(_) if is_before => {
+            BranchStatus::Taken(_)
+              if maybe_curr_branch_idx
+                .map(|x| branch_idx < x)
+                .unwrap_or(false) =>
+            {
               trace_log!(
                 self,
                 "Someone is already working on this set of assignments.",
@@ -256,7 +301,7 @@ impl<'a, W> SearchNode<'a, W> {
             BranchStatus::Taken(child) => {
               // We should go down into this child.
               trace_log!(self, "Pushing a taken branch to check.");
-              branches_list.push((branch_idx, child.clone()));
+              branches_list.push(child.clone());
             }
           }
         }
@@ -885,6 +930,7 @@ impl<'a, W> Clone for SearchNode<'a, W> {
       splits_for_clause: self.splits_for_clause.clone(),
       depth: self.depth,
       non_reducing_depth: self.non_reducing_depth,
+      disjunct_nodes: self.disjunct_nodes.clone(),
     }
   }
 }

@@ -21,7 +21,7 @@ pub struct Branches<'a, W> {
   pub taken_branches: AtomicBitSet,
   /// A list of the assigmment for a branch before running a fix point.
   pub taken_branches_assignments:
-    Mutex<[Option<(VecMap<Word>, BranchStatus<'a, W>)>; AtomicBitSet::MAX as usize]>,
+    Mutex<[Option<(VecMap<Word>, BranchStatus<'a, W>, BitSetUsize)>; AtomicBitSet::MAX as usize]>,
   /// A set of the branches which have been taken and where the assignment has been set in
   /// `self.branch_assignments`.
   pub set_taken_branches_assignments: AtomicBitSet,
@@ -119,7 +119,7 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
       }
       // Select a branch, clone `self.node` and perform the split on that node. We do this in a
       // loop because if all branches are finished we backtrack (I.E change `self` to the parent).
-      let (node, branch_idx) = loop {
+      let (node, branch_idx, disjunct_branches) = loop {
         // Check if all branches are taken by some thread, otherwise take the first available
         // branch.
         if let Some(branch_idx) =
@@ -160,8 +160,8 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
           node.depth += 1;
           node.non_reducing_depth = non_reducing_depth;
           // Execute the branch / perform the split.
-          self.splits.fix_var(&mut node, branch_idx);
-          break (node, branch_idx);
+          let disjunct_branches = self.splits.fix_var(&mut node, branch_idx);
+          break (node, branch_idx, disjunct_branches);
         } else {
           // All splits have been taken. If there are still threads working on splits, or if some
           // thread has already backtracked, we should return `DidntFinishSearch`, otherwise we
@@ -217,13 +217,14 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
       match node.compute(Some((branch_idx, self.clone()))) {
         x @ (FoundSolution(Unsat) | WillReachMaxDepth | TakenAssignments) => {
           self.finished_branches.add(branch_idx, AcqRel);
+          let branch_status = match x {
+            FoundSolution(Unsat) => BranchStatus::ProvedUnsat,
+            WillReachMaxDepth => BranchStatus::ReachedMaxDepth,
+            TakenAssignments => BranchStatus::Taken(Weak::new()),
+            _ => unreachable!(),
+          };
           self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] =
-            Some((assignments, match x {
-              FoundSolution(Unsat) => BranchStatus::ProvedUnsat,
-              WillReachMaxDepth => BranchStatus::ReachedMaxDepth,
-              TakenAssignments => BranchStatus::Taken(Weak::new()),
-              _ => unreachable!(),
-            }));
+            Some((assignments, branch_status, disjunct_branches));
           self.set_taken_branches_assignments.add(branch_idx, AcqRel);
         }
         FoundSolution(x) => return ProvedSolution(x),
@@ -235,8 +236,11 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
             self.non_reducing_max_depth,
             Some((branch_idx, self.clone())),
           );
-          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] =
-            Some((assignments, BranchStatus::Taken(Arc::downgrade(&child))));
+          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] = Some((
+            assignments,
+            BranchStatus::Taken(Arc::downgrade(&child)),
+            disjunct_branches,
+          ));
           self.set_taken_branches_assignments.add(branch_idx, AcqRel);
           self = child;
         }

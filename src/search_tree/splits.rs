@@ -146,7 +146,7 @@ impl Splits {
   ///
   /// Returns a `(variable, assignment)` pair where `variable` is the variable to be
   /// assigned and `assignment` is the terms to assign to the variable.
-  pub fn fix_var<W>(&self, node: &mut SearchNode<W>, mut n: u32) {
+  pub fn fix_var<W>(&self, node: &mut SearchNode<W>, mut n: u32) -> BitSetUsize {
     if let Some(side) = self.first_last_var_test {
       if n == 0 {
         let other_side = node
@@ -168,30 +168,45 @@ impl Splits {
         let ((EmptyOrTerminal(x, _, _), _) | (TwoVars(x, _), Lhs) | (TwoVars(_, x), Rhs)) =
           (&self.kind, side);
         node.fix_var(*x, replacement);
-        return;
+        return *BitSetUsize::empty().complement().remove(0);
       } else {
         n -= 1;
       }
     }
-    match (&self.kind, n) {
-      (EmptyOrTerminal(x, _, _), 0) => node.fix_var(*x, []),
-      (EmptyOrTerminal(x, a, _), n) => {
-        // TODO: Try to remove cloning.
-        if n < self.len() - 1 {
-          node.fix_var(*x, [Term::Terminal(Terminal(a.0[..n as usize].into()))])
-        } else {
-          node.fix_var(*x, [
-            Term::Terminal(Terminal(a.0[..n as usize].into())),
-            Term::Variable(*x),
-          ])
+    match &self.kind {
+      EmptyOrTerminal(x, a, _) => {
+        match n {
+          0 => node.fix_var(*x, []),
+          n => {
+            // TODO: Try to remove cloning.
+            if n < self.len() - 1 {
+              node.fix_var(*x, [Term::Terminal(Terminal(a.0[..n as usize].into()))])
+            } else {
+              node.fix_var(*x, [
+                Term::Terminal(Terminal(a.0[..n as usize].into())),
+                Term::Variable(*x),
+              ])
+            }
+          }
         }
+        BitSetUsize::empty()
       }
-      (TwoVars(x, _), 0) | (TwoVars(_, x), 1) => node.fix_var(*x, []),
-      (TwoVars(y, x), 2) | (TwoVars(x, y), 3) => {
-        let (x, y) = if self.reversed { (y, x) } else { (x, y) };
-        node.fix_var(*x, [Term::Variable(*y), Term::Variable(*x)])
+      TwoVars(x, y) => {
+        match n {
+          0 => node.fix_var(*x, []),
+          1 => node.fix_var(*y, []),
+          2 => {
+            let (y, x) = if self.reversed { (y, x) } else { (x, y) };
+            node.fix_var(*x, [Term::Variable(*y), Term::Variable(*x)])
+          }
+          3 => {
+            let (x, y) = if self.reversed { (y, x) } else { (x, y) };
+            node.fix_var(*x, [Term::Variable(*y), Term::Variable(*x)])
+          }
+          _ => unreachable!(),
+        }
+        *BitSetUsize::empty().complement()
       }
-      _ => unreachable!(),
     }
   }
 }
