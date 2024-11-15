@@ -3,6 +3,10 @@
 use std::fmt;
 use std::mem;
 
+use allocator_api2::{
+  alloc::{Allocator, Global},
+  vec::Vec,
+};
 use nonmax::NonMaxUsize;
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +31,7 @@ impl ListPtr {
 }
 
 /// An occupied entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OccupiedEntry<T> {
   item: T,
   prev: Option<ListPtr>,
@@ -35,7 +39,7 @@ pub(crate) struct OccupiedEntry<T> {
 }
 
 /// An entry in a list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Entry<T> {
   Occupied(OccupiedEntry<T>),
   Vacant {
@@ -45,8 +49,10 @@ pub(crate) enum Entry<T> {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct VecList<T> {
-  entries: Vec<Entry<T>>,
+pub struct VecList<T, A: Allocator = Global> {
+  #[serde(bound(deserialize = "T: Deserialize<'de>, A: Default"))]
+  #[serde(bound(serialize = "T: Serialize"))]
+  entries: Vec<Entry<T>, A>,
   head: Option<ListPtr>,
   back: Option<ListPtr>,
   vacant_head: Option<ListPtr>,
@@ -73,6 +79,56 @@ impl<T> VecList<T> {
       back: None,
       vacant_head: None,
       len: 0,
+    }
+  }
+}
+
+impl<T, A: Allocator> VecList<T, A> {
+  /// Create a new empty list.
+  pub fn new_in(alloc: A) -> Self {
+    Self {
+      entries: Vec::new_in(alloc),
+      head: None,
+      back: None,
+      vacant_head: None,
+      len: 0,
+    }
+  }
+
+  /// Create a new empty list with a capacity.
+  pub fn with_capacity_in(cap: usize, alloc: A) -> Self {
+    Self {
+      entries: Vec::with_capacity_in(cap, alloc),
+      head: None,
+      back: None,
+      vacant_head: None,
+      len: 0,
+    }
+  }
+
+  /// Clone the list with a map function and a new allocator.
+  pub fn clone_map_in<U, B: Allocator>(
+    &self,
+    mut clone_item: impl FnMut(&T) -> U,
+    alloc: B,
+  ) -> VecList<U, B> {
+    let mut entries = Vec::with_capacity_in(self.entries.len(), alloc);
+    entries.extend(self.entries.iter().map(|entry| match entry {
+      Entry::Occupied(OccupiedEntry { item, prev, next }) => Entry::Occupied(OccupiedEntry {
+        item: clone_item(item),
+        prev: *prev,
+        next: *next,
+      }),
+      Entry::Vacant { next_vacant } => Entry::Vacant {
+        next_vacant: *next_vacant,
+      },
+    }));
+    VecList {
+      entries,
+      head: self.head,
+      back: self.back,
+      vacant_head: self.vacant_head,
+      len: self.len,
     }
   }
 
@@ -273,13 +329,13 @@ impl<T> VecList<T> {
 }
 
 #[derive(Debug)]
-struct Iter<'a, T> {
-  list: &'a VecList<T>,
+struct Iter<'a, T, A: Allocator> {
+  list: &'a VecList<T, A>,
   start: Option<ListPtr>,
   end: Option<ListPtr>,
 }
 
-impl<'a, T> Iterator for Iter<'a, T> {
+impl<'a, T, A: Allocator> Iterator for Iter<'a, T, A> {
   type Item = (ListPtr, &'a T);
   fn next(&mut self) -> Option<Self::Item> {
     if let Some(start) = self.start {
@@ -295,7 +351,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
   }
 }
 
-impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
+impl<'a, T, A: Allocator> DoubleEndedIterator for Iter<'a, T, A> {
   fn next_back(&mut self) -> Option<Self::Item> {
     if let Some(end) = self.end {
       let OccupiedEntry { item, prev, .. } = self.list.get_occupied(end);
@@ -310,7 +366,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
   }
 }
 
-impl<'a, T> Clone for Iter<'a, T> {
+impl<'a, T, A: Allocator> Clone for Iter<'a, T, A> {
   fn clone(&self) -> Self {
     Self {
       list: self.list,
@@ -320,25 +376,26 @@ impl<'a, T> Clone for Iter<'a, T> {
   }
 }
 
-impl<'a, T> Copy for Iter<'a, T> {}
+impl<'a, T, A: Allocator> Copy for Iter<'a, T, A> {}
+
+impl<T, A: Allocator> Extend<T> for VecList<T, A> {
+  fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+    for x in iter {
+      self.insert_back(x);
+    }
+  }
+}
 
 impl<T> FromIterator<T> for VecList<T> {
   fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-    let mut list = VecList::new();
+    let mut list = Self::new();
     for x in iter {
       list.insert_back(x);
     }
     list
   }
 }
-
-impl<T> Default for VecList<T> {
-  fn default() -> Self {
-    VecList::new()
-  }
-}
-
-impl<T: fmt::Debug> fmt::Debug for VecList<T> {
+impl<T: fmt::Debug, A: Allocator> fmt::Debug for VecList<T, A> {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     write!(f, "[")?;
     for (ptr, x) in self.iter() {
@@ -457,6 +514,14 @@ mod tests {
       maybe_vacant = next_vacant;
     }
     assert_eq!(maybe_vacant, None);
+
+    // Check clone_map_in().
+    let cloned = list.clone_map_in(|x| *x, Global::default());
+    assert_eq!(list.entries, cloned.entries);
+    assert_eq!(list.head, cloned.head);
+    assert_eq!(list.back, cloned.back);
+    assert_eq!(list.vacant_head, cloned.vacant_head);
+    assert_eq!(list.len, cloned.len);
   }
 
   #[test]

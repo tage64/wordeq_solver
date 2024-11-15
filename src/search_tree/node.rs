@@ -10,7 +10,7 @@ use rustc_hash::FxHashMap;
 use vec_map::VecMap;
 
 use super::{BranchStatus, Branches, SharedInfo, SplitKind, Splits, trace_log};
-use crate::vec_list::{Entry, ListPtr};
+use crate::vec_list::{Entry, ListPtr, VecList};
 use crate::*;
 
 /// A result returned from the compute method on a search node.
@@ -175,9 +175,7 @@ impl<'a, W> SearchNode<'a, W> {
     trace_log!(
       self,
       "Solving formula: {}",
-      self
-        .formula
-        .display(|x| &self.shared_info.original_formula.var_names[x.id]),
+      self.shared_info.original_formula
     );
     self.assert_invariants();
     // Run the fix point function.
@@ -185,9 +183,7 @@ impl<'a, W> SearchNode<'a, W> {
     trace_log!(
       self,
       "After fix_point(): {}",
-      self
-        .formula
-        .display(|x| &self.shared_info.original_formula.var_names[x.id]),
+      self.shared_info.original_formula
     );
     if let Err(()) = fix_point_res {
       // This node is unsat.
@@ -263,10 +259,10 @@ impl<'a, W> SearchNode<'a, W> {
             .map(|(var_id, val)| format!(
               "{} = {}",
               &self.shared_info.original_formula.var_names[var_id],
-              display_word(val.0.iter().map(|(_, t)| t), |x| &self
+              self
                 .shared_info
                 .original_formula
-                .var_names[x.id])
+                .display_word(val.0.iter().map(|(_, t)| t))
             ))
             .fold(String::new(), |a, b| a + " " + &b),
         );
@@ -589,11 +585,19 @@ impl<'a, W> SearchNode<'a, W> {
           if a == b {
             lhs.0.remove(lhs_back_ptr.unwrap());
             rhs.0.remove(rhs_back_ptr.unwrap());
-          } else if a.0.ends_with(b.0.as_str()) {
-            a.0.truncate(a.0.len() - b.0.len());
+          } else if a.0.ends_with(&b.0) {
+            a.replace_with(|x| {
+              let mut x = x.into_vec();
+              x.truncate(x.len() - b.0.len());
+              x.into_boxed_slice()
+            });
             rhs.0.remove(rhs_back_ptr.unwrap());
-          } else if b.0.ends_with(a.0.as_str()) {
-            b.0.truncate(b.0.len() - a.0.len());
+          } else if b.0.ends_with(&a.0) {
+            b.replace_with(|x| {
+              let mut x = x.into_vec();
+              x.truncate(x.len() - a.0.len());
+              x.into_boxed_slice()
+            });
             lhs.0.remove(lhs_back_ptr.unwrap());
           } else {
             // Rule 6: Both sides end with distinct terminals:
@@ -652,17 +656,25 @@ impl<'a, W> SearchNode<'a, W> {
           if a == b {
             lhs.0.remove(lhs_head_ptr.unwrap());
             rhs.0.remove(rhs_head_ptr.unwrap());
-          } else if a.0.starts_with(b.0.as_str()) {
+          } else if a.0.starts_with(&b.0) {
             let Term::Terminal(a) = lhs.0.get_mut(lhs_head_ptr.unwrap()) else {
               unreachable!()
             };
-            drop(a.0.drain(..b.0.len()));
+            a.replace_with(|x| {
+              let mut x = x.into_vec();
+              drop(x.drain(..b.0.len()));
+              x.into_boxed_slice()
+            });
             rhs.0.remove(rhs_head_ptr.unwrap());
-          } else if b.0.starts_with(a.0.as_str()) {
+          } else if b.0.starts_with(&a.0) {
             let Term::Terminal(b) = rhs.0.get_mut(rhs_head_ptr.unwrap()) else {
               unreachable!()
             };
-            drop(b.0.drain(..a.0.len()));
+            b.replace_with(|x| {
+              let mut x = x.into_vec();
+              drop(x.drain(..a.0.len()));
+              x.into_boxed_slice()
+            });
             lhs.0.remove(lhs_head_ptr.unwrap());
           } else {
             // Rule 6: Both sides start with distinct terminals:
@@ -741,9 +753,10 @@ impl<'a, W> SearchNode<'a, W> {
       self,
       "fixing: {} = {}",
       &self.shared_info.original_formula.var_names[var.id],
-      display_word(val.clone().into_iter().collect::<Vec<_>>().iter(), |x| {
-        &self.shared_info.original_formula.var_names[x.id]
-      }),
+      self
+        .shared_info
+        .original_formula
+        .display_word(val.clone().into_iter().collect::<Vec<_>>().iter()),
     );
     for (clause_id, (lhs_ptrs, rhs_ptrs)) in self.var_ptrs.remove(var.id).unwrap().iter() {
       self.updated_clauses.insert(clause_id);
@@ -817,7 +830,7 @@ impl<'a, W> SearchNode<'a, W> {
       }
     }
     if let vec_map::Entry::Vacant(entry) = self.assignments.entry(var.id) {
-      let mut assignment = Word::default();
+      let mut assignment: Word = Word(VecList::new());
       for insert_term in val.clone() {
         if let Term::Variable(x) = &insert_term {
           let x = *x;

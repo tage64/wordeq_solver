@@ -6,7 +6,7 @@ use smt_str_solver::*;
 
 #[test]
 fn test_simple_equations() {
-  let formula_1 = Formula::new(Cnf(VecList::new()), Vec::new());
+  let formula_1 = Formula::new(Cnf(VecList::new()), Vec::new(), Vec::new());
   solve_simple(formula_1).assert_sat();
   let formula_2 = Formula::new(
     Cnf(
@@ -20,13 +20,18 @@ fn test_simple_equations() {
       .collect(),
     ),
     vec!["X".into(), "Y".into()],
+    Vec::new(),
   );
   solve_simple(formula_2).assert_sat();
   let formula_3 = Formula::new(
     Cnf(
       [Clause {
         equation: Equation {
-          lhs: Word([Term::Terminal(Terminal("a".into()))].into_iter().collect()),
+          lhs: Word(
+            [Term::Terminal(Terminal(Box::new([0])))]
+              .into_iter()
+              .collect(),
+          ),
           rhs: Word(VecList::new()),
         },
       }]
@@ -34,6 +39,7 @@ fn test_simple_equations() {
       .collect(),
     ),
     Vec::new(),
+    vec!['a'],
   );
   solve_simple(formula_3).assert_unsat();
 }

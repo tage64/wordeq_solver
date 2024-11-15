@@ -1,7 +1,7 @@
 use std::cell::{OnceCell, RefCell};
 use std::fmt;
 
-use compact_str::CompactString;
+use compact_str::{CompactString, ToCompactString};
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
 use vec_map::VecMap;
@@ -75,14 +75,18 @@ impl SatResult {
         let mut substituted_lhs = CompactString::default();
         for (_, term) in clause.equation.lhs.0.iter() {
           match term {
-            Term::Terminal(Terminal(s)) => substituted_lhs += s,
+            Term::Terminal(_) => {
+              substituted_lhs += &self.formula.display_word([term]).to_compact_string()
+            }
             Term::Variable(var) => substituted_lhs += &self.get_var(*var),
           }
         }
         let mut substituted_rhs = CompactString::default();
         for (_, term) in clause.equation.rhs.0.iter() {
           match term {
-            Term::Terminal(Terminal(s)) => substituted_rhs += s,
+            Term::Terminal(_) => {
+              substituted_rhs += &self.formula.display_word([term]).to_compact_string()
+            }
             Term::Variable(var) => substituted_rhs += &self.get_var(*var),
           }
         }
@@ -102,8 +106,8 @@ impl SatResult {
         .0
         .iter()
         .filter_map(|(_, term)| {
-          if let Term::Terminal(Terminal(s)) = term {
-            Some(s.as_str())
+          if let Term::Terminal(_) = term {
+            Some(self.formula.display_word([term]).to_compact_string())
           } else {
             None
           }

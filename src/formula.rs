@@ -10,7 +10,7 @@ use crate::vec_list::VecList;
 
 /// A terminal (a character).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Terminal(pub CompactString);
+pub struct Terminal(pub Box<[u8]>);
 
 /// A variable with a unique id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -27,16 +27,16 @@ pub enum Term {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BorrowedTerm<'a> {
-  Terminal(&'a str),
+  Terminal(&'a [u8]),
   Variable(Variable),
 }
 
 /// A word is a list of terms.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Word(pub VecList<Term>);
 
 /// An equality constraint.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Equation {
   pub lhs: Word,
   pub rhs: Word,
@@ -51,14 +51,14 @@ pub enum Side {
 pub use Side::*;
 
 /// A clause in a conjunction.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clause {
   /// This could be extended to be disjunction and negations but it is only an equation for now.
   pub equation: Equation,
 }
 
 /// A list of clauses.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cnf(pub VecList<Clause>);
 
 /// A formula.
@@ -66,13 +66,23 @@ pub struct Cnf(pub VecList<Clause>);
 pub struct Formula {
   pub(crate) cnf: Cnf,
   pub(crate) var_names: Vec<CompactString>,
+  pub(crate) terminal_chars: Vec<char>,
+}
+
+impl Terminal {
+  /// Update the text given the old content.
+  pub fn replace_with(&mut self, f: impl FnOnce(Box<[u8]>) -> Box<[u8]>) {
+    let old = mem::replace(&mut self.0, Box::new([]));
+    let new = f(old);
+    self.0 = new;
+  }
 }
 
 impl Term {
   fn borrow(&self) -> BorrowedTerm<'_> {
     match self {
       Term::Variable(x) => BorrowedTerm::Variable(*x),
-      Term::Terminal(Terminal(s)) => BorrowedTerm::Terminal(s.as_str()),
+      Term::Terminal(Terminal(s)) => BorrowedTerm::Terminal(&s),
     }
   }
 }
@@ -81,36 +91,40 @@ impl Word {
   pub fn from_str_split_terminals(
     text: &str,
     mut get_var: impl FnMut(char) -> Option<Variable>,
-    mut split_terminal: impl FnMut(&str, char) -> bool,
+    mut get_terminal: impl FnMut(char) -> u8,
+    mut split_terminal: impl FnMut(&[u8], char) -> bool,
   ) -> Word {
     let mut word = Word(VecList::new());
-    let mut curr_word_terminal = CompactString::default();
+    let mut curr_word_terminal = Vec::new();
     for c in text.chars() {
       let maybe_var = get_var(c);
       if !curr_word_terminal.is_empty()
         && (maybe_var.is_some() || split_terminal(&curr_word_terminal, c))
       {
-        word.0.insert_back(Term::Terminal(Terminal(mem::replace(
-          &mut curr_word_terminal,
-          Default::default(),
-        ))));
+        word.0.insert_back(Term::Terminal(Terminal(
+          mem::replace(&mut curr_word_terminal, Default::default()).into_boxed_slice(),
+        )));
       }
       if let Some(var) = maybe_var {
         word.0.insert_back(Term::Variable(var));
       } else {
-        curr_word_terminal.push(c);
+        curr_word_terminal.push(get_terminal(c));
       }
     }
     if !curr_word_terminal.is_empty() {
-      word
-        .0
-        .insert_back(Term::Terminal(Terminal(curr_word_terminal)));
+      word.0.insert_back(Term::Terminal(Terminal(
+        curr_word_terminal.into_boxed_slice(),
+      )));
     }
     word
   }
 
-  pub fn from_str(text: &str, get_var: impl FnMut(char) -> Option<Variable>) -> Word {
-    Self::from_str_split_terminals(text, get_var, |_, _| false)
+  pub fn from_str(
+    text: &str,
+    get_var: impl FnMut(char) -> Option<Variable>,
+    get_terminal: impl FnMut(char) -> u8,
+  ) -> Word {
+    Self::from_str_split_terminals(text, get_var, get_terminal, |_, _| false)
   }
 }
 
@@ -171,8 +185,12 @@ impl Side {
 }
 
 impl Formula {
-  pub fn new(cnf: Cnf, var_names: Vec<CompactString>) -> Self {
-    Self { cnf, var_names }
+  pub fn new(cnf: Cnf, var_names: Vec<CompactString>, terminal_chars: Vec<char>) -> Self {
+    Self {
+      cnf,
+      var_names,
+      terminal_chars,
+    }
   }
 
   pub fn from_strs(equations: &[(&str, &str)], mut is_variable: impl FnMut(char) -> bool) -> Self {
@@ -187,10 +205,20 @@ impl Formula {
         None
       }
     };
+    let mut used_terminals = HashMap::<char, u8>::new(); // Terminals and there assigned numbers.
+    let mut get_terminal = |c: char| {
+      let next_terminal_id = used_terminals.len();
+      *used_terminals
+        .entry(c)
+        .or_insert(next_terminal_id.try_into().expect(
+          "Too many different terminals. Currently we only support 256 different terminals in a \
+           formula.",
+        ))
+    };
     let mut cnf = Cnf(VecList::with_capacity(equations.len()));
     for (text_lhs, text_rhs) in equations {
-      let lhs = Word::from_str(text_lhs, &mut get_var);
-      let rhs = Word::from_str(text_rhs, &mut get_var);
+      let lhs = Word::from_str(text_lhs, &mut get_var, &mut get_terminal);
+      let rhs = Word::from_str(text_rhs, &mut get_var, &mut get_terminal);
       cnf.0.insert_back(Clause {
         equation: Equation { lhs, rhs },
       });
@@ -201,7 +229,9 @@ impl Formula {
       .into_iter()
       .map(|c| c.to_string().into())
       .collect();
-    Self::new(cnf, var_names)
+    let mut terminal_names = used_terminals.keys().copied().collect::<Vec<char>>();
+    terminal_names.sort_unstable_by_key(|x| used_terminals[x]);
+    Self::new(cnf, var_names, terminal_names)
   }
 
   /// Parse a .eq file.
@@ -213,70 +243,54 @@ impl Formula {
   pub fn no_vars(&self) -> usize {
     self.var_names.len()
   }
-}
 
-pub fn display_word<'a, D: fmt::Display>(
-  word: impl IntoIterator<Item = &'a Term> + Clone,
-  get_var_name: impl Fn(&Variable) -> D,
-) -> impl fmt::Display {
-  struct Displayer<F, W>(W, F);
-  impl<'a, F, W, D> fmt::Display for Displayer<F, W>
+  /// Display a word in this formula.
+  pub fn display_word<'a, W>(&'a self, word: W) -> impl fmt::Display + use<'a, W>
   where
     W: IntoIterator<Item = &'a Term> + Clone,
-    F: Fn(&Variable) -> D,
-    D: fmt::Display,
   {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-      for x in self.0.clone() {
-        match x {
-          Term::Terminal(Terminal(t)) => write!(f, "{t}")?,
-          Term::Variable(v) => write!(f, "{}", (self.1)(v))?,
-        }
-      }
-      Ok(())
-    }
-  }
-  Displayer(word, get_var_name)
-}
-
-impl Cnf {
-  pub fn display<'a, D: fmt::Display>(
-    &'a self,
-    get_var_name: impl Fn(&Variable) -> D + 'a,
-  ) -> impl fmt::Display + 'a {
-    struct Displayer<'a, F>(&'a Cnf, F);
-    impl<F, D> fmt::Display for Displayer<'_, F>
+    struct Displayer<'a, W>(&'a Formula, W);
+    impl<'a, W> fmt::Display for Displayer<'a, W>
     where
-      F: Fn(&Variable) -> D,
-      D: fmt::Display,
+      W: IntoIterator<Item = &'a Term> + Clone,
     {
       fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (clause_ptr, clause) in self.0.0.iter() {
-          write!(
-            f,
-            "{}",
-            display_word(clause.equation.lhs.0.iter().map(|(_, x)| x), &self.1)
-          )?;
-          write!(f, " = ")?;
-          write!(
-            f,
-            "{}",
-            display_word(clause.equation.rhs.0.iter().map(|(_, x)| x), &self.1)
-          )?;
-          if clause_ptr != self.0.0.back().unwrap() {
-            write!(f, "; ")?;
+        for term in self.1.clone() {
+          match term {
+            Term::Terminal(Terminal(t)) => {
+              for x in t.iter() {
+                write!(f, "{}", self.0.terminal_chars[*x as usize])?
+              }
+            }
+            Term::Variable(Variable { id }) => write!(f, "{}", self.0.var_names[*id])?,
           }
         }
         Ok(())
       }
     }
-    Displayer(self, get_var_name)
+    Displayer(self, word)
   }
 }
 
 impl fmt::Display for Formula {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    self.cnf.display(|x| &self.var_names[x.id]).fmt(f)
+    for (clause_ptr, clause) in self.cnf.0.iter() {
+      write!(
+        f,
+        "{}",
+        self.display_word(clause.equation.lhs.0.iter().map(|(_, x)| x))
+      )?;
+      write!(f, " = ")?;
+      write!(
+        f,
+        "{}",
+        self.display_word(clause.equation.rhs.0.iter().map(|(_, x)| x))
+      )?;
+      if clause_ptr != self.cnf.0.back().unwrap() {
+        write!(f, "; ")?;
+      }
+    }
+    Ok(())
   }
 }
 
@@ -303,6 +317,7 @@ mod tests {
             None
           }
         },
+        |c| c as u8,
         |_, _| rng.borrow_mut().gen_bool(1.0 / 3.0),
       )
     };
