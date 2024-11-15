@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::mem;
 
+use allocator_api2::alloc::{Allocator, Global};
 use arrayvec::ArrayVec;
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
@@ -37,13 +38,15 @@ enum BorrowedTerm<'a> {
 
 /// A word is a list of terms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Word(pub VecList<Term>);
+#[serde(bound(deserialize = "A:Default", serialize = ""))]
+pub struct Word<A: Allocator = Global>(pub VecList<Term, A>);
 
 /// An equality constraint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Equation {
-  pub lhs: Word,
-  pub rhs: Word,
+#[serde(bound(deserialize = "A:Default", serialize = ""))]
+pub struct Equation<A: Allocator = Global> {
+  pub lhs: Word<A>,
+  pub rhs: Word<A>,
 }
 
 /// A side in an equation, LHS or RHS.
@@ -56,19 +59,22 @@ pub use Side::*;
 
 /// A clause in a conjunction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Clause {
+#[serde(bound(deserialize = "A:Default", serialize = ""))]
+pub struct Clause<A: Allocator = Global> {
   /// This could be extended to be disjunction and negations but it is only an equation for now.
-  pub equation: Equation,
+  pub equation: Equation<A>,
 }
 
 /// A list of clauses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Cnf(pub VecList<Clause>);
+#[serde(bound(deserialize = "A:Default", serialize = ""))]
+pub struct Cnf<A: Allocator = Global>(pub VecList<Clause<A>, A>);
 
 /// A formula.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Formula {
-  pub(crate) cnf: Cnf,
+#[serde(bound(deserialize = "A:Default", serialize = ""))]
+pub struct Formula<A: Allocator = Global> {
+  pub(crate) cnf: Cnf<A>,
   pub(crate) var_names: Vec<CompactString>,
   pub(crate) terminal_chars: Vec<char>,
 }
@@ -113,6 +119,13 @@ impl Word {
   }
 }
 
+impl<A: Allocator> Word<A> {
+  /// Clone the word with a new allocator.
+  pub fn clone_in<B: Allocator>(&self, alloc: B) -> Word<B> {
+    Word(self.0.clone_map_in(|x| x.clone(), alloc))
+  }
+}
+
 impl PartialEq for Word {
   fn eq(&self, other: &Self) -> bool {
     let mut iter1 = self.0.iter().map(|(_, t)| t.borrow());
@@ -148,13 +161,21 @@ impl PartialEq for Word {
 
 impl Eq for Word {}
 
-impl Equation {
+impl<A: Allocator> Equation<A> {
   /// Get a side of the equation.
-  pub fn side(&self, side: Side) -> &Word {
+  pub fn side(&self, side: Side) -> &Word<A> {
     let Self { lhs, rhs } = self;
     match side {
       Lhs => lhs,
       Rhs => rhs,
+    }
+  }
+
+  /// Clone the equation with a new allocator.
+  pub fn clone_in<B: Allocator + Copy>(&self, alloc: B) -> Equation<B> {
+    Equation {
+      lhs: self.lhs.clone_in(alloc),
+      rhs: self.rhs.clone_in(alloc),
     }
   }
 }
@@ -165,6 +186,15 @@ impl Side {
     match self {
       Lhs => Rhs,
       Rhs => Lhs,
+    }
+  }
+}
+
+impl<A: Allocator> Clause<A> {
+  /// Clone the clause with a new allocator.
+  pub fn clone_in<B: Allocator + Copy>(&self, alloc: B) -> Clause<B> {
+    Clause {
+      equation: self.equation.clone_in(alloc),
     }
   }
 }

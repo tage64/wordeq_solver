@@ -49,9 +49,11 @@ pub(crate) enum Entry<T> {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(bound(
+  deserialize = "T: Deserialize<'de>, A: Default",
+  serialize = "T: Serialize"
+))]
 pub struct VecList<T, A: Allocator = Global> {
-  #[serde(bound(deserialize = "T: Deserialize<'de>, A: Default"))]
-  #[serde(bound(serialize = "T: Serialize"))]
   entries: Vec<Entry<T>, A>,
   head: Option<ListPtr>,
   back: Option<ListPtr>,
