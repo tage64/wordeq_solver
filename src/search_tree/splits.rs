@@ -180,10 +180,12 @@ impl Splits {
           n => {
             // TODO: Try to remove cloning.
             if n < self.len() - 1 {
-              node.fix_var(*x, [Term::Terminal(Terminal(a.0[..n as usize].into()))])
+              node.fix_var(*x, [Term::Terminal(Terminal(
+                a.0[..n as usize].try_into().unwrap(),
+              ))])
             } else {
               node.fix_var(*x, [
-                Term::Terminal(Terminal(a.0[..n as usize].into())),
+                Term::Terminal(Terminal(a.0[..n as usize].try_into().unwrap())),
                 Term::Variable(*x),
               ])
             }

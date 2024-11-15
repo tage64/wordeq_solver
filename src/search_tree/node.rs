@@ -586,18 +586,10 @@ impl<'a, W> SearchNode<'a, W> {
             lhs.0.remove(lhs_back_ptr.unwrap());
             rhs.0.remove(rhs_back_ptr.unwrap());
           } else if a.0.ends_with(&b.0) {
-            a.replace_with(|x| {
-              let mut x = x.into_vec();
-              x.truncate(x.len() - b.0.len());
-              x.into_boxed_slice()
-            });
+            a.0.truncate(a.0.len() - b.0.len());
             rhs.0.remove(rhs_back_ptr.unwrap());
           } else if b.0.ends_with(&a.0) {
-            b.replace_with(|x| {
-              let mut x = x.into_vec();
-              x.truncate(x.len() - a.0.len());
-              x.into_boxed_slice()
-            });
+            b.0.truncate(b.0.len() - a.0.len());
             lhs.0.remove(lhs_back_ptr.unwrap());
           } else {
             // Rule 6: Both sides end with distinct terminals:
@@ -660,21 +652,13 @@ impl<'a, W> SearchNode<'a, W> {
             let Term::Terminal(a) = lhs.0.get_mut(lhs_head_ptr.unwrap()) else {
               unreachable!()
             };
-            a.replace_with(|x| {
-              let mut x = x.into_vec();
-              drop(x.drain(..b.0.len()));
-              x.into_boxed_slice()
-            });
+            drop(a.0.drain(..b.0.len()));
             rhs.0.remove(rhs_head_ptr.unwrap());
           } else if b.0.starts_with(&a.0) {
             let Term::Terminal(b) = rhs.0.get_mut(rhs_head_ptr.unwrap()) else {
               unreachable!()
             };
-            b.replace_with(|x| {
-              let mut x = x.into_vec();
-              drop(x.drain(..a.0.len()));
-              x.into_boxed_slice()
-            });
+            drop(b.0.drain(..a.0.len()));
             lhs.0.remove(lhs_head_ptr.unwrap());
           } else {
             // Rule 6: Both sides start with distinct terminals:

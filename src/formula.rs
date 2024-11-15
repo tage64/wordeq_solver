@@ -3,14 +3,18 @@ use std::collections::HashMap;
 use std::fmt;
 use std::mem;
 
+use arrayvec::ArrayVec;
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
-use crate::vec_list::VecList;
+use crate::{AtomicBitSet, vec_list::VecList};
+
+/// The maximum length of a terminal.
+const TERMINAL_MAX_LEN: usize = AtomicBitSet::MAX as usize;
 
 /// A terminal (a character).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Terminal(pub Box<[u8]>);
+pub struct Terminal(pub ArrayVec<u8, TERMINAL_MAX_LEN>);
 
 /// A variable with a unique id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -69,15 +73,6 @@ pub struct Formula {
   pub(crate) terminal_chars: Vec<char>,
 }
 
-impl Terminal {
-  /// Update the text given the old content.
-  pub fn replace_with(&mut self, f: impl FnOnce(Box<[u8]>) -> Box<[u8]>) {
-    let old = mem::replace(&mut self.0, Box::new([]));
-    let new = f(old);
-    self.0 = new;
-  }
-}
-
 impl Term {
   fn borrow(&self) -> BorrowedTerm<'_> {
     match self {
@@ -88,22 +83,20 @@ impl Term {
 }
 
 impl Word {
-  pub fn from_str_split_terminals(
+  pub fn from_str(
     text: &str,
     mut get_var: impl FnMut(char) -> Option<Variable>,
     mut get_terminal: impl FnMut(char) -> u8,
-    mut split_terminal: impl FnMut(&[u8], char) -> bool,
   ) -> Word {
     let mut word = Word(VecList::new());
-    let mut curr_word_terminal = Vec::new();
+    let mut curr_word_terminal = ArrayVec::new();
     for c in text.chars() {
       let maybe_var = get_var(c);
-      if !curr_word_terminal.is_empty()
-        && (maybe_var.is_some() || split_terminal(&curr_word_terminal, c))
-      {
-        word.0.insert_back(Term::Terminal(Terminal(
-          mem::replace(&mut curr_word_terminal, Default::default()).into_boxed_slice(),
-        )));
+      if !curr_word_terminal.is_empty() && (maybe_var.is_some() || curr_word_terminal.is_full()) {
+        word.0.insert_back(Term::Terminal(Terminal(mem::replace(
+          &mut curr_word_terminal,
+          Default::default(),
+        ))));
       }
       if let Some(var) = maybe_var {
         word.0.insert_back(Term::Variable(var));
@@ -112,19 +105,11 @@ impl Word {
       }
     }
     if !curr_word_terminal.is_empty() {
-      word.0.insert_back(Term::Terminal(Terminal(
-        curr_word_terminal.into_boxed_slice(),
-      )));
+      word
+        .0
+        .insert_back(Term::Terminal(Terminal(curr_word_terminal)));
     }
     word
-  }
-
-  pub fn from_str(
-    text: &str,
-    get_var: impl FnMut(char) -> Option<Variable>,
-    get_terminal: impl FnMut(char) -> u8,
-  ) -> Word {
-    Self::from_str_split_terminals(text, get_var, get_terminal, |_, _| false)
   }
 }
 
@@ -308,7 +293,7 @@ mod tests {
     let rng = RefCell::new(rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(42));
     // Function to create words from strs where terminals are split randomly.
     let mk_word = |s: &str| {
-      Word::from_str_split_terminals(
+      Word::from_str(
         s,
         |c| {
           if ('N'..='Z').contains(&c) {
@@ -318,13 +303,12 @@ mod tests {
           }
         },
         |c| c as u8,
-        |_, _| rng.borrow_mut().gen_bool(1.0 / 3.0),
       )
     };
     assert_eq!(mk_word(""), mk_word(""));
     // Generate some random words and test equality.
     for _ in 0..256 {
-      let len = rng.borrow_mut().gen_range(0..8);
+      let len = rng.borrow_mut().gen_range(0..TERMINAL_MAX_LEN * 2 + 2);
       let text = Alphanumeric.sample_string(&mut *rng.borrow_mut(), len);
       assert_eq!(mk_word(&text), mk_word(&text));
       if len > 0 {

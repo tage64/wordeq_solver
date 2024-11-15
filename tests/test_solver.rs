@@ -28,9 +28,11 @@ fn test_simple_equations() {
       [Clause {
         equation: Equation {
           lhs: Word(
-            [Term::Terminal(Terminal(Box::new([0])))]
-              .into_iter()
-              .collect(),
+            [Term::Terminal(Terminal(
+              [0u8].as_slice().try_into().unwrap(),
+            ))]
+            .into_iter()
+            .collect(),
           ),
           rhs: Word(VecList::new()),
         },
