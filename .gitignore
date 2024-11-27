@@ -1,4 +1,4 @@
 /target
-/benchmark*
+/benchmark*/
 cachegrind.out.*
 callgrind.out.*
