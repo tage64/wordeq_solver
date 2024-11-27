@@ -142,16 +142,24 @@ fn main() -> Result<()> {
     }
     Subcmd::Benchmark1 { n } => {
       if let Some(n) = n {
-        run_benchmark(benchmark_n("benchmark_1")?.take(n), timeout, n_threads)?;
+        run_benchmark(
+          benchmark_from_zip("benchmark1.zip")?.take(n),
+          timeout,
+          n_threads,
+        )?;
       } else {
-        run_benchmark(benchmark_n("benchmark_1")?, timeout, n_threads)?;
+        run_benchmark(benchmark_from_zip("benchmark1.zip")?, timeout, n_threads)?;
       }
     }
     Subcmd::Benchmark2 { n } => {
       if let Some(n) = n {
-        run_benchmark(benchmark_n("benchmark_2")?.take(n), timeout, n_threads)?;
+        run_benchmark(
+          benchmark_from_zip("benchmark2.zip")?.take(n),
+          timeout,
+          n_threads,
+        )?;
       } else {
-        run_benchmark(benchmark_n("benchmark_2")?, timeout, n_threads)?;
+        run_benchmark(benchmark_from_zip("benchmark2.zip")?, timeout, n_threads)?;
       }
     }
   }

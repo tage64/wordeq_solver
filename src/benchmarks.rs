@@ -1,8 +1,10 @@
-use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::num::NonZero;
 use std::time::Duration;
 
 use rand::prelude::*;
+use zip::ZipArchive;
 
 use crate::*;
 
@@ -80,15 +82,25 @@ pub fn random_formulae(n: usize) -> impl ExactSizeIterator<Item = Formula> {
   })
 }
 
-/// A sorted iterator of all formulae in benchmark_1.
-pub fn benchmark_n(dir: &str) -> anyhow::Result<impl ExactSizeIterator<Item = Formula>> {
-  let mut files = fs::read_dir(dir)?
-    .map(|entry| Ok(entry?.path()))
-    .collect::<anyhow::Result<Vec<_>>>()?;
+/// Given a ZIP-file containing only .eq (equation) files, produce a sorted iterator over the
+/// formulae.
+pub fn benchmark_from_zip(
+  zip_file: &str,
+) -> anyhow::Result<impl ExactSizeIterator<Item = Formula>> {
+  let mut zip_archive = ZipArchive::new(File::open(zip_file)?)?;
+  let mut files = zip_archive
+    .file_names()
+    .map(|x| x.to_string())
+    .collect::<Vec<_>>();
   files.sort();
+  let mut buf = String::new();
   files
     .into_iter()
-    .map(|f| Formula::from_eq_file(&fs::read_to_string(f)?))
+    .map(|f| {
+      buf.clear();
+      zip_archive.by_name(&f)?.read_to_string(&mut buf)?;
+      Formula::from_eq_file(&buf)
+    })
     .collect::<anyhow::Result<Vec<_>>>()
     .map(|x| x.into_iter())
 }
