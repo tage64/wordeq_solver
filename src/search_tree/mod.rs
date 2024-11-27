@@ -4,16 +4,18 @@ pub mod solution;
 mod splits;
 use std::array;
 use std::hint;
+use std::mem::{self, MaybeUninit};
 use std::num::NonZero;
 use std::ops::ControlFlow::{self, *};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::*};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use branches::{BranchStatus, Branches, SearchResult::*};
+use branches::{Branches, SearchResult::*, branch_status};
 use node::ComputeResult::{self, *};
 pub use node::SearchNode;
 use splits::{SplitKind, Splits};
+use sync_unsafe_cell::SyncUnsafeCell;
 
 use crate::*;
 
@@ -100,7 +102,7 @@ struct SearchTree<'a, W> {
   ///
   /// If `i` is not in `self.available_threads` or is in `self.busy_threads`,
   /// `self.posted_work[i]` is not initialized.
-  posted_work: [Mutex<Option<Arc<Branches<'a, W>>>>; AtomicBitSet::MAX as usize],
+  posted_work: [SyncUnsafeCell<MaybeUninit<Arc<Branches<'a, W>>>>; AtomicBitSet::MAX as usize],
   /// If any thread founds a solution, it will be put in this mutex and `self.solution_condvar`
   /// will be notified.
   solution: Mutex<Option<Solution>>,
@@ -139,7 +141,7 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
       n_threads,
       unavailable_threads: AtomicBitSet::new(),
       busy_threads: AtomicBitSet::new(),
-      posted_work: array::from_fn(|_| Mutex::new(None)),
+      posted_work: array::from_fn(|_| SyncUnsafeCell::new(MaybeUninit::uninit())),
       solution: Mutex::new(None),
       solution_condvar: Condvar::new(),
       should_exit_search: AtomicBool::new(false),
@@ -196,10 +198,7 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
     else {
       return Err(());
     };
-    let mut lock = self.posted_work[index as usize].try_lock().unwrap();
-    assert!(lock.is_none());
-    *lock = Some(branches.clone());
-    drop(lock);
+    unsafe { &mut *self.posted_work[index as usize].get() }.write(branches.clone());
     // Mark the thread as busy. The spin loop in the thread will recognize this and the thread will
     // start working after this is set.
     self.busy_threads.add(index, AcqRel);
@@ -231,11 +230,13 @@ impl<'a, W: NodeWatcher> SearchTree<'a, W> {
       #[cfg(feature = "trace_logging")]
       log::trace!("Thread {} got work", index + 1);
       // Take the work.
-      let mut branches = self.posted_work[index as usize]
-        .lock()
-        .unwrap()
-        .take()
-        .unwrap();
+      let mut branches = unsafe {
+        mem::replace(
+          &mut *self.posted_work[index as usize].get(),
+          MaybeUninit::uninit(),
+        )
+        .assume_init()
+      };
       loop {
         match branches.search(self) {
           ProvedSolution(x) => {

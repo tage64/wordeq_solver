@@ -1,7 +1,9 @@
 use std::array;
-use std::sync::atomic::{AtomicBool, Ordering::*};
-use std::sync::{Arc, Mutex, Weak};
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::*};
+use std::sync::{Arc, Weak};
 
+use sync_unsafe_cell::SyncUnsafeCell;
 use vec_map::VecMap;
 
 use super::{ComputeResult::*, SearchTree, SplitKind, Splits};
@@ -10,7 +12,6 @@ use crate::*;
 /// A node in the search tree together with its branches.
 ///
 /// We keep track of which branches have been taken and which branches have been finished.
-#[derive(Debug)]
 pub struct Branches<'a, W> {
   /// The node from from which the branches are derived.
   pub node: SearchNode<'a, W>,
@@ -19,9 +20,9 @@ pub struct Branches<'a, W> {
   /// A set of all splits which have been taken by any thread. The elements are indices in the
   /// range `0..self.splits.len()`.
   pub taken_branches: AtomicBitSet,
-  /// A list of the assigmment for a branch before running a fix point.
+  /// A list of the assignmment for a branch before running a fix point.
   pub taken_branches_assignments:
-    Mutex<[Option<(VecMap<Word>, BranchStatus<'a, W>, BitSetUsize)>; AtomicBitSet::MAX as usize]>,
+    Box<[SyncUnsafeCell<MaybeUninit<BranchAssignments<'a, W>>>; AtomicBitSet::MAX as usize]>,
   /// A set of the branches which have been taken and where the assignment has been set in
   /// `self.branch_assignments`.
   pub set_taken_branches_assignments: AtomicBitSet,
@@ -48,16 +49,30 @@ pub struct Branches<'a, W> {
   pub parent: Option<(u32, Arc<Branches<'a, W>>)>,
 }
 
-/// A state for a taken branch.
+/// The assignments for a branch before performing a fix point.
 #[derive(Debug)]
-pub enum BranchStatus<'a, W> {
-  /// The branch is taken but we have no result.
-  Taken(Weak<Branches<'a, W>>),
-  /// The branch is finished but we have no result because we reached max depth.
-  ReachedMaxDepth,
-  /// The branch is proved UNSAT,
-  ProvedUnsat,
+pub struct BranchAssignments<'a, W> {
+  /// assignments[i] = the assignment for the variable with index i. Similar to
+  /// `SearchNode.assignments`.
+  pub assignments: VecMap<Word>,
+  /// A set of all other branches which may overlap with this branch.
+  pub possibly_overlapping_branches: BitSetUsize,
+  /// The status of this branch represented by any of the constants `TAKEN_BRANCH`,
+  /// `REACHED_MAX_DEPTH`, or `PROVED_UNSAT`.
+  pub status: AtomicU32,
+  /// If someone is working on this branch we store a reference to it here.
+  pub branches_ref: Weak<Branches<'a, W>>,
 }
+
+pub mod branch_status {
+  /// The branch is taken but we have no result.
+  pub const TAKEN_BRANCH: u32 = 0;
+  /// The branch is finished but we have no result because we reached max depth.
+  pub const REACHED_MAX_DEPTH: u32 = 1;
+  /// The branch is proved UNSAT,
+  pub const PROVED_UNSAT: u32 = 2;
+}
+use branch_status::*;
 
 /// A result from searching for a solution.
 #[derive(Debug)]
@@ -87,7 +102,9 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
       non_reducing_max_depth,
       parent,
       taken_branches: AtomicBitSet::new(),
-      taken_branches_assignments: Mutex::new(array::from_fn(|_| None)),
+      taken_branches_assignments: Box::new(array::from_fn(|_| {
+        SyncUnsafeCell::new(const { MaybeUninit::uninit() })
+      })),
       set_taken_branches_assignments: AtomicBitSet::new(),
       finished_branches: AtomicBitSet::new(),
       has_backtracked: AtomicBool::new(false),
@@ -119,7 +136,7 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
       }
       // Select a branch, clone `self.node` and perform the split on that node. We do this in a
       // loop because if all branches are finished we backtrack (I.E change `self` to the parent).
-      let (node, branch_idx, disjunct_branches) = loop {
+      let (node, branch_idx, possibly_overlapping_branches) = loop {
         // Check if all branches are taken by some thread, otherwise take the first available
         // branch.
         if let Some(branch_idx) =
@@ -160,8 +177,8 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
           node.depth += 1;
           node.non_reducing_depth = non_reducing_depth;
           // Execute the branch / perform the split.
-          let disjunct_branches = self.splits.fix_var(&mut node, branch_idx);
-          break (node, branch_idx, disjunct_branches);
+          let possibly_overlapping_branches = self.splits.fix_var(&mut node, branch_idx);
+          break (node, branch_idx, possibly_overlapping_branches);
         } else {
           // All splits have been taken. If there are still threads working on splits, or if some
           // thread has already backtracked, we should return `DidntFinishSearch`, otherwise we
@@ -188,17 +205,24 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
               .reached_max_depth
               .fetch_or(reached_max_depth, AcqRel);
             // Set taken_branches_assignments status.
-            parent_edge.taken_branches_assignments.lock().unwrap()[*parent_branch_idx as usize]
-              .as_mut()
-              .unwrap()
-              .1 = if reached_max_depth {
-              BranchStatus::ReachedMaxDepth
-            } else {
-              BranchStatus::ProvedUnsat
-            };
-            parent_edge
-              .set_taken_branches_assignments
-              .add(*parent_branch_idx, AcqRel);
+            debug_assert!(
+              parent_edge
+                .set_taken_branches_assignments
+                .contains(*parent_branch_idx, Acquire)
+            );
+            unsafe {
+              (*parent_edge.taken_branches_assignments[*parent_branch_idx as usize].get())
+                .assume_init_ref()
+            }
+            .status
+            .store(
+              if reached_max_depth {
+                REACHED_MAX_DEPTH
+              } else {
+                PROVED_UNSAT
+              },
+              Release,
+            );
             // Add `parent_branch_idx` to the parent's `finished_branches`.
             parent_edge
               .finished_branches
@@ -217,14 +241,20 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
       match node.compute(Some((branch_idx, self.clone()))) {
         x @ (FoundSolution(Unsat) | WillReachMaxDepth | TakenAssignments) => {
           self.finished_branches.add(branch_idx, AcqRel);
-          let branch_status = match x {
-            FoundSolution(Unsat) => BranchStatus::ProvedUnsat,
-            WillReachMaxDepth => BranchStatus::ReachedMaxDepth,
-            TakenAssignments => BranchStatus::Taken(Weak::new()),
+          let status = AtomicU32::new(match x {
+            FoundSolution(Unsat) => PROVED_UNSAT,
+            WillReachMaxDepth => REACHED_MAX_DEPTH,
+            TakenAssignments => TAKEN_BRANCH,
             _ => unreachable!(),
-          };
-          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] =
-            Some((assignments, branch_status, disjunct_branches));
+          });
+          unsafe { &mut *self.taken_branches_assignments[branch_idx as usize].get() }.write(
+            BranchAssignments {
+              assignments,
+              status,
+              possibly_overlapping_branches,
+              branches_ref: Weak::new(),
+            },
+          );
           self.set_taken_branches_assignments.add(branch_idx, AcqRel);
         }
         FoundSolution(x) => return ProvedSolution(x),
@@ -236,11 +266,14 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
             self.non_reducing_max_depth,
             Some((branch_idx, self.clone())),
           );
-          self.taken_branches_assignments.lock().unwrap()[branch_idx as usize] = Some((
-            assignments,
-            BranchStatus::Taken(Arc::downgrade(&child)),
-            disjunct_branches,
-          ));
+          unsafe { &mut *self.taken_branches_assignments[branch_idx as usize].get() }.write(
+            BranchAssignments {
+              assignments,
+              status: AtomicU32::new(TAKEN_BRANCH),
+              branches_ref: Arc::downgrade(&child),
+              possibly_overlapping_branches,
+            },
+          );
           self.set_taken_branches_assignments.add(branch_idx, AcqRel);
           self = child;
         }

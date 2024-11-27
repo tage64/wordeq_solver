@@ -9,12 +9,11 @@ use bit_set::BitSet;
 use rustc_hash::FxHashMap;
 use vec_map::VecMap;
 
-use super::{BranchStatus, Branches, SharedInfo, SplitKind, Splits, trace_log};
+use super::{Branches, SharedInfo, SplitKind, Splits, branch_status::*, trace_log};
 use crate::vec_list::{Entry, ListPtr, VecList};
 use crate::*;
 
 /// A result returned from the compute method on a search node.
-#[derive(Debug)]
 pub enum ComputeResult<'a, W> {
   /// A solution is found for this branch.
   FoundSolution(Solution),
@@ -79,7 +78,6 @@ impl<T> Hash for ArcPtrHash<T> {
 }
 
 /// A node in the search tree.
-#[derive(Debug)]
 pub struct SearchNode<'a, W> {
   pub(super) shared_info: &'a SharedInfo<W>,
   /// The formula to solve. Clauses may be removed or modified but new clauses will never be added.
@@ -233,14 +231,17 @@ impl<'a, W> SearchNode<'a, W> {
         if disjunct_branches.contains(branch_idx) {
           continue;
         }
-        let taken_branches_assignments_lock =
-          parent_branches.taken_branches_assignments.lock().unwrap();
-        let (assignments, status, possibly_overlapping_branches) = taken_branches_assignments_lock
-          [branch_idx as usize]
-          .as_ref()
-          .unwrap();
+        let branch_assignments = unsafe {
+          (&*parent_branches.taken_branches_assignments[branch_idx as usize].get())
+            .assume_init_ref()
+        };
         if let Some(curr_branch_idx) = maybe_curr_branch_idx {
-          disjunct_branches.add_all(possibly_overlapping_branches.clone().complement());
+          disjunct_branches.add_all(
+            branch_assignments
+              .possibly_overlapping_branches
+              .clone()
+              .complement(),
+          );
           if disjunct_branches.contains(curr_branch_idx) {
             continue;
           }
@@ -254,7 +255,8 @@ impl<'a, W> SearchNode<'a, W> {
           )
           .map(|(i, _)| i)
           .collect::<Vec<_>>(),
-          assignments
+          branch_assignments
+            .assignments
             .iter()
             .map(|(var_id, val)| format!(
               "{} = {}",
@@ -267,23 +269,24 @@ impl<'a, W> SearchNode<'a, W> {
             .fold(String::new(), |a, b| a + " " + &b),
         );
         // Check if `assignments` is a subset of `self.assignments`.
-        if assignments
+        if branch_assignments
+          .assignments
           .iter()
           .all(|(var, val)| self.assignments.get(var) == Some(val))
         {
-          match status {
-            BranchStatus::ProvedUnsat => {
+          match branch_assignments.status.load(Acquire) {
+            PROVED_UNSAT => {
               trace_log!(self, "This branch is already proven UNSAT;");
               return FoundSolution(Unsat);
             }
-            BranchStatus::ReachedMaxDepth => {
+            REACHED_MAX_DEPTH => {
               trace_log!(
                 self,
                 "This assignment is already checked and will not find a result until max depth.",
               );
               return WillReachMaxDepth;
             }
-            BranchStatus::Taken(_)
+            TAKEN_BRANCH
               if maybe_curr_branch_idx
                 .map(|x| branch_idx < x)
                 .unwrap_or(false) =>
@@ -294,11 +297,12 @@ impl<'a, W> SearchNode<'a, W> {
               );
               return TakenAssignments;
             }
-            BranchStatus::Taken(child) => {
+            TAKEN_BRANCH => {
               // We should go down into this child.
               trace_log!(self, "Pushing a taken branch to check.");
-              branches_list.push(child.clone());
+              branches_list.push(branch_assignments.branches_ref.clone());
             }
+            _ => unreachable!(),
           }
         }
       }
