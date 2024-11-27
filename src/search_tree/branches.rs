@@ -1,5 +1,3 @@
-use std::array;
-use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::*};
 use std::sync::{Arc, Weak};
 
@@ -22,7 +20,7 @@ pub struct Branches<'a, W> {
   pub taken_branches: AtomicBitSet,
   /// A list of the assignmment for a branch before running a fix point.
   pub taken_branches_assignments:
-    Box<[SyncUnsafeCell<MaybeUninit<BranchAssignments<'a, W>>>; AtomicBitSet::MAX as usize]>,
+    Box<[SyncUnsafeCell<Option<BranchAssignments<'a, W>>>; AtomicBitSet::MAX as usize]>,
   /// A set of the branches which have been taken and where the assignment has been set in
   /// `self.branch_assignments`.
   pub set_taken_branches_assignments: AtomicBitSet,
@@ -50,7 +48,7 @@ pub struct Branches<'a, W> {
 }
 
 /// The assignments for a branch before performing a fix point.
-#[derive(Debug)]
+#[derive(Default)]
 pub struct BranchAssignments<'a, W> {
   /// assignments[i] = the assignment for the variable with index i. Similar to
   /// `SearchNode.assignments`.
@@ -102,9 +100,9 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
       non_reducing_max_depth,
       parent,
       taken_branches: AtomicBitSet::new(),
-      taken_branches_assignments: Box::new(array::from_fn(|_| {
-        SyncUnsafeCell::new(const { MaybeUninit::uninit() })
-      })),
+      taken_branches_assignments: Box::new(
+        [const { SyncUnsafeCell::new(None) }; AtomicBitSet::MAX as usize],
+      ),
       set_taken_branches_assignments: AtomicBitSet::new(),
       finished_branches: AtomicBitSet::new(),
       has_backtracked: AtomicBool::new(false),
@@ -212,7 +210,8 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
             );
             unsafe {
               (*parent_edge.taken_branches_assignments[*parent_branch_idx as usize].get())
-                .assume_init_ref()
+                .as_ref()
+                .unwrap()
             }
             .status
             .store(
@@ -247,14 +246,13 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
             TakenAssignments => TAKEN_BRANCH,
             _ => unreachable!(),
           });
-          unsafe { &mut *self.taken_branches_assignments[branch_idx as usize].get() }.write(
-            BranchAssignments {
+          *unsafe { &mut *self.taken_branches_assignments[branch_idx as usize].get() } =
+            Some(BranchAssignments {
               assignments,
               status,
               possibly_overlapping_branches,
               branches_ref: Weak::new(),
-            },
-          );
+            });
           self.set_taken_branches_assignments.add(branch_idx, AcqRel);
         }
         FoundSolution(x) => return ProvedSolution(x),
@@ -266,14 +264,13 @@ impl<'a, W: NodeWatcher> Branches<'a, W> {
             self.non_reducing_max_depth,
             Some((branch_idx, self.clone())),
           );
-          unsafe { &mut *self.taken_branches_assignments[branch_idx as usize].get() }.write(
-            BranchAssignments {
+          *unsafe { &mut *self.taken_branches_assignments[branch_idx as usize].get() } =
+            Some(BranchAssignments {
               assignments,
               status: AtomicU32::new(TAKEN_BRANCH),
               branches_ref: Arc::downgrade(&child),
               possibly_overlapping_branches,
-            },
-          );
+            });
           self.set_taken_branches_assignments.add(branch_idx, AcqRel);
           self = child;
         }

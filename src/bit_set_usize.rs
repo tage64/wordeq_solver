@@ -1,5 +1,5 @@
 /// A bit set with a single usize as backing storage.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct BitSetUsize(usize);
 
 impl BitSetUsize {

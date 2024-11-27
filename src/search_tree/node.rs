@@ -233,7 +233,8 @@ impl<'a, W> SearchNode<'a, W> {
         }
         let branch_assignments = unsafe {
           (&*parent_branches.taken_branches_assignments[branch_idx as usize].get())
-            .assume_init_ref()
+            .as_ref()
+            .unwrap()
         };
         if let Some(curr_branch_idx) = maybe_curr_branch_idx {
           disjunct_branches.add_all(
