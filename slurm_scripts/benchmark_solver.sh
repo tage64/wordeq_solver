@@ -3,7 +3,7 @@
 #SBATCH -M snowy
 #SBATCH -p core
 #SBATCH -n 16
-#SBATCH -t 5-00:00:00
+#SBATCH -t 00:1:00
 #SBATCH -a 1-951:50
 #SBATCH -J str_solver_benchmark_parallelism
 
