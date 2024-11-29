@@ -122,8 +122,8 @@ fn main() -> Result<()> {
     }
     Subcmd::Benchmark { benchmark } => match benchmark {
       Benchmark::Rand1 => Box::new(random_formulae(cli.n.unwrap_or(1000))),
-      Benchmark::B1 => Box::new(benchmark_from_zip("benchmark1.zip")?),
-      Benchmark::B2 => Box::new(benchmark_from_zip("benchmark2.zip")?),
+      Benchmark::B1 => Box::new(benchmark_n(1)?),
+      Benchmark::B2 => Box::new(benchmark_n(2)?),
     },
   };
   if let Some(n) = cli.n {

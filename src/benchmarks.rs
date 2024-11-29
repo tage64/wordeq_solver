@@ -1,5 +1,4 @@
-use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
 use std::num::NonZero;
 use std::time::Duration;
 
@@ -82,12 +81,16 @@ pub fn random_formulae(n: usize) -> impl ExactSizeIterator<Item = Formula> {
   })
 }
 
-/// Given a ZIP-file containing only .eq (equation) files, produce a sorted iterator over the
-/// formulae.
-pub fn benchmark_from_zip(
-  zip_file: &str,
-) -> anyhow::Result<impl ExactSizeIterator<Item = Formula>> {
-  let mut zip_archive = ZipArchive::new(File::open(zip_file)?)?;
+/// Return an iterator of all formulae in the nth benchmark. Currently there are two benchmarks, so
+/// n should be in the range `[1..=2]`.
+pub fn benchmark_n(n: u32) -> anyhow::Result<impl ExactSizeIterator<Item = Formula>> {
+  // The benchmarks are stored in ZIP files in the benchmarks directory in the repository root.
+  let zip_file_content = match n {
+    1 => include_bytes!("../benchmarks/1.zip").as_slice(),
+    2 => include_bytes!("../benchmarks/2.zip").as_slice(),
+    x => panic!("Only benchmarks 1 and to are available, not {x}"),
+  };
+  let mut zip_archive = ZipArchive::new(io::Cursor::new(zip_file_content))?;
   let mut files = zip_archive
     .file_names()
     .map(|x| x.to_string())
