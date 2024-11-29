@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::thread::available_parallelism;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser as _;
 use flexi_logger::{LogSpecification, Logger};
 use log::LevelFilter::*;
@@ -23,6 +23,11 @@ struct Cli {
   /// Timeout for each formula in seconds.
   #[arg(short, long, default_value_t = 16.0)]
   timeout: f64,
+  /// Solve at most n formulae.
+  n: Option<usize>,
+  /// Solve only the nth formula
+  #[arg(short, long)]
+  only: Option<usize>,
   /// The number of threads, defaults to to the available number of threads on the system.
   #[arg(short = 'p', long)]
   threads: Option<NonZero<u32>>,
@@ -41,29 +46,25 @@ struct Cli {
 enum Subcmd {
   /// Solve a single formula.
   Solve {
-    /// Read a .eq file, otherwise read equations line by line from STDIN where uppercase letters are
-    /// variables.
-    eq_file: Option<PathBuf>,
+    /// Read one or more .eq files, otherwise read equations line by line from STDIN where
+    /// uppercase letters are variables.
+    eq_files: Vec<PathBuf>,
   },
+  /// Run a benchmark.
+  Benchmark {
+    #[arg(value_enum)]
+    benchmark: Benchmark,
+  },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum Benchmark {
   /// Benchmark small randomly but deterministically generated formulae.
-  Random1 {
-    /// The number of formulae.
-    #[arg(default_value_t = 1000)]
-    n: usize,
-    /// Solve only the nth formula
-    #[arg(short, long)]
-    only: Option<usize>,
-  },
-  /// Run benchmark 1.
-  Benchmark1 {
-    /// Run only the n first formulae.
-    n: Option<usize>,
-  },
-  /// Run benchmark 2.
-  Benchmark2 {
-    /// Run only the n first formulae.
-    n: Option<usize>,
-  },
+  Rand1,
+  /// 1000 small formulae which should be solved under a second.
+  B1,
+  /// 1000 large formulae. 15-20 % can be solved within a few seconds.
+  B2,
 }
 
 fn main() -> Result<()> {
@@ -88,14 +89,25 @@ fn main() -> Result<()> {
     available_parallelism()?.try_into().unwrap()
   };
   log::info!("Using {} threads.", n_threads.get());
-  match cli.subcmd {
-    Subcmd::Solve { eq_file } => {
-      let formula = if let Some(eq_file) = eq_file {
-        Formula::from_eq_file(&fs::read_to_string(eq_file)?)?
+
+  // We use dynamic dispatch for the iterator here for convenience. It is not performance
+  // critical so it should be fine.
+  let mut formulae: Box<dyn ExactSizeIterator<Item = Formula>> = match cli.subcmd {
+    Subcmd::Solve { eq_files } => {
+      if !eq_files.is_empty() {
+        Box::new(
+          eq_files
+            .into_iter()
+            .map(|eq_file| -> Result<_> {
+              Ok(Formula::from_eq_file(&fs::read_to_string(eq_file)?)?)
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter(),
+        )
       } else {
         let mut stdin = String::new();
         io::stdin().lock().read_to_string(&mut stdin)?;
-        Formula::from_strs(
+        Box::new(iter::once(Formula::from_strs(
           &stdin
             .lines()
             .map(|line| {
@@ -105,62 +117,49 @@ fn main() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?,
           char::is_uppercase,
-        )
-      };
-      let (mut solution, stats) = solve(
-        formula.clone(),
-        CollectNodeStats::from_now(
-          timeout,
-          if cli.mem_info {
-            Some(PRINT_STATS_INTERVAL)
-          } else {
-            None
-          },
-        ),
-        n_threads,
-      );
-      println!("{solution}; {stats}");
-      if let Sat(x) = &mut solution {
-        x.assert_correct();
-        log::info!("{}", x.display());
+        )))
       }
     }
-    Subcmd::Random1 { n, only } => {
-      if let Some(only) = only {
-        run_benchmark(
-          iter::once(
-            random_formulae(n)
-              .nth(only - 1)
-              .ok_or_else(|| anyhow!("{only} out of range"))?,
-          ),
-          timeout,
-          n_threads,
-        )?;
-      } else {
-        run_benchmark(random_formulae(n), timeout, n_threads)?;
-      }
-    }
-    Subcmd::Benchmark1 { n } => {
-      if let Some(n) = n {
-        run_benchmark(
-          benchmark_from_zip("benchmark1.zip")?.take(n),
-          timeout,
-          n_threads,
-        )?;
-      } else {
-        run_benchmark(benchmark_from_zip("benchmark1.zip")?, timeout, n_threads)?;
-      }
-    }
-    Subcmd::Benchmark2 { n } => {
-      if let Some(n) = n {
-        run_benchmark(
-          benchmark_from_zip("benchmark2.zip")?.take(n),
-          timeout,
-          n_threads,
-        )?;
-      } else {
-        run_benchmark(benchmark_from_zip("benchmark2.zip")?, timeout, n_threads)?;
-      }
+    Subcmd::Benchmark { benchmark } => match benchmark {
+      Benchmark::Rand1 => Box::new(random_formulae(cli.n.unwrap_or(1000))),
+      Benchmark::B1 => Box::new(benchmark_from_zip("benchmark1.zip")?),
+      Benchmark::B2 => Box::new(benchmark_from_zip("benchmark2.zip")?),
+    },
+  };
+  if let Some(n) = cli.n {
+    formulae = Box::new(formulae.take(n));
+  }
+  if let Some(only) = cli.only {
+    formulae = Box::new(iter::once(formulae.nth(only - 1).with_context(|| {
+      format!(
+        "There are only {} formulae in this benchmark.",
+        formulae.len()
+      )
+    })?));
+  }
+  if formulae.len() > 1 {
+    run_benchmark(formulae, timeout, n_threads)?;
+  } else {
+    let Some(formula) = formulae.next() else {
+      println!("No formulae.");
+      return Ok(());
+    };
+    let (mut solution, stats) = solve(
+      formula.clone(),
+      CollectNodeStats::from_now(
+        timeout,
+        if cli.mem_info {
+          Some(PRINT_STATS_INTERVAL)
+        } else {
+          None
+        },
+      ),
+      n_threads,
+    );
+    println!("{solution}; {stats}");
+    if let Sat(x) = &mut solution {
+      x.assert_correct();
+      log::info!("{}", x.display());
     }
   }
   Ok(())
