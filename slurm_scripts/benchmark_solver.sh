@@ -3,11 +3,11 @@
 #SBATCH -M snowy
 #SBATCH -p core
 #SBATCH -n 16
-#SBATCH -t 00:1:00
+#SBATCH -t 7:00:00
 #SBATCH -a 1-951:50
 #SBATCH -J str_solver_benchmark_parallelism
 
-echo cargo r -r -- \
+cargo r -r -- \
   -p16 -vt300 \
   --skip $SLURM_ARRAY_TASK_ID \
   --take $(($SLURM_ARRAY_TASK_ID + 49)) \
