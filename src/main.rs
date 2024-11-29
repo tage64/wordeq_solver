@@ -23,10 +23,16 @@ struct Cli {
   /// Timeout for each formula in seconds.
   #[arg(short, long, default_value_t = 16.0)]
   timeout: f64,
-  /// Solve at most n formulae.
-  n: Option<usize>,
+  /// Only consider the n first formulae. Can be used together with `--skip` to create a range.
+  ///
+  /// To use formulae `[50..=100]` use --take 100 --skip 49.
+  #[arg(long)]
+  take: Option<usize>,
+  /// Skip the n first formulae.
+  #[arg(long)]
+  skip: Option<usize>,
   /// Solve only the nth formula
-  #[arg(short, long)]
+  #[arg(short, long, conflicts_with_all=["take", "skip"])]
   only: Option<usize>,
   /// The number of threads, defaults to to the available number of threads on the system.
   #[arg(short = 'p', long)]
@@ -92,7 +98,7 @@ fn main() -> Result<()> {
 
   // We use dynamic dispatch for the iterator here for convenience. It is not performance
   // critical so it should be fine.
-  let mut formulae: Box<dyn ExactSizeIterator<Item = Formula>> = match cli.subcmd {
+  let formulae: Box<dyn ExactSizeIterator<Item = Formula>> = match cli.subcmd {
     Subcmd::Solve { eq_files } => {
       if !eq_files.is_empty() {
         Box::new(
@@ -121,13 +127,17 @@ fn main() -> Result<()> {
       }
     }
     Subcmd::Benchmark { benchmark } => match benchmark {
-      Benchmark::Rand1 => Box::new(random_formulae(cli.n.unwrap_or(1000))),
+      Benchmark::Rand1 => Box::new(random_formulae(cli.take.unwrap_or(1000))),
       Benchmark::B1 => Box::new(benchmark_n(1)?),
       Benchmark::B2 => Box::new(benchmark_n(2)?),
     },
   };
-  if let Some(n) = cli.n {
-    formulae = Box::new(formulae.take(n));
+  let mut formulae: Box<dyn ExactSizeIterator<Item = (usize, _)>> = Box::new(formulae.enumerate());
+  if let Some(take) = cli.take {
+    formulae = Box::new(formulae.take(take));
+  }
+  if let Some(skip) = cli.skip {
+    formulae = Box::new(formulae.skip(skip));
   }
   if let Some(only) = cli.only {
     formulae = Box::new(iter::once(formulae.nth(only - 1).with_context(|| {
@@ -140,7 +150,7 @@ fn main() -> Result<()> {
   if formulae.len() > 1 {
     run_benchmark(formulae, timeout, n_threads)?;
   } else {
-    let Some(formula) = formulae.next() else {
+    let Some((_, formula)) = formulae.next() else {
       println!("No formulae.");
       return Ok(());
     };

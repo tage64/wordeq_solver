@@ -10,12 +10,12 @@ use crate::*;
 type SolverResult = (Formula, Solution, NodeStats);
 
 pub fn run_benchmark(
-  formulae: impl ExactSizeIterator<Item = Formula>,
+  formulae: impl ExactSizeIterator<Item = (usize, Formula)>,
   timeout: Duration,
   n_threads: NonZero<u32>,
 ) -> anyhow::Result<Vec<SolverResult>> {
   let mut results: Vec<SolverResult> = Vec::new();
-  for (i, formula) in formulae.enumerate() {
+  for (i, formula) in formulae {
     log::info!("Formula {}: {formula}", i + 1);
     let (mut solution, stats) = solve(
       formula.clone(),
