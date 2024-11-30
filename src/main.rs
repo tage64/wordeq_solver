@@ -40,6 +40,11 @@ struct Cli {
   /// Print out the running time and the solution.
   #[arg(short, long)]
   verbose: bool,
+  /// Write solution and statistics for each formula to a .bincode (binary) file.
+  ///
+  /// See <https://crates.io/crates/bincode> for more information about the format.
+  #[arg(long="bincode", value_hint=clap::ValueHint::FilePath)]
+  bincode_file: Option<PathBuf>,
   /// Be super verbose and print lots of trace debug info. (Requires the trace_logging feature.)
   #[arg(short, long)]
   debug: bool,
@@ -88,6 +93,16 @@ fn main() -> Result<()> {
     .log_to_stdout()
     .start()
     .unwrap();
+
+  // If we should write to a .bincode file, create the file now rather than after solving. It would
+  // not be fun to run the solver for some days just to realize that the .bincode file couldn't
+  // be created.
+  let bincode_file = cli
+    .bincode_file
+    .map(fs::File::create)
+    .transpose()
+    .context("Failed to create .bincode file.")?;
+
   let timeout = Duration::from_secs_f64(cli.timeout);
   let n_threads = if let Some(x) = cli.threads {
     x
@@ -148,7 +163,10 @@ fn main() -> Result<()> {
     })?));
   }
   if formulae.len() > 1 {
-    run_benchmark(formulae, timeout, n_threads)?;
+    let results = run_benchmark(formulae, timeout, n_threads)?;
+    if let Some(bincode_file) = bincode_file {
+      bincode::serialize_into(bincode_file, &results)?;
+    }
   } else {
     let Some((_, formula)) = formulae.next() else {
       println!("No formulae.");
@@ -170,6 +188,9 @@ fn main() -> Result<()> {
     if let Sat(x) = &mut solution {
       x.assert_correct();
       log::info!("{}", x.display());
+    }
+    if let Some(bincode_file) = bincode_file {
+      bincode::serialize_into(bincode_file, &[(formula, solution, stats)])?;
     }
   }
   Ok(())

@@ -11,4 +11,5 @@ cargo r -r -- \
   -p16 -vt300 \
   --skip $SLURM_ARRAY_TASK_ID \
   --take $(($SLURM_ARRAY_TASK_ID + 49)) \
+  --bincode "res_${SLURM_ARRAY_TASK_ID}_$(($SLURM_ARRAY_TASK_ID + 49)).bincode" \
   benchmark b2

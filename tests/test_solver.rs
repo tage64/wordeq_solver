@@ -49,13 +49,13 @@ fn test_simple_equations() {
 #[test]
 fn random1() {
   let single_thread = run_benchmark(
-    random_formulae(200),
+    random_formulae(200).enumerate(),
     Duration::from_secs(8),
     1.try_into().unwrap(),
   )
   .unwrap();
   let multi_thread = run_benchmark(
-    random_formulae(200),
+    random_formulae(200).enumerate(),
     Duration::from_secs(8),
     4.try_into().unwrap(),
   )
