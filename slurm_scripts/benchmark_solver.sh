@@ -4,12 +4,14 @@
 #SBATCH -p core
 #SBATCH -n 16
 #SBATCH -t 7:00:00
-#SBATCH -a 1-951:50
+#SBATCH -a 0-950:50
 #SBATCH -J str_solver_benchmark_parallelism
 
+SKIP=$SLURM_ARRAY_TASK_ID
+TAKE=$(($SLURM_ARRAY_TASK_ID + 50))
 cargo r -r -- \
   -p16 -vt300 \
-  --skip $SLURM_ARRAY_TASK_ID \
-  --take $(($SLURM_ARRAY_TASK_ID + 49)) \
-  --bincode "res_${SLURM_ARRAY_TASK_ID}_$(($SLURM_ARRAY_TASK_ID + 49)).bincode" \
+  --skip $SKIP \
+  --take $TAKE \
+  --bincode "res_${SKIP}_${TAKE}.bincode" \
   benchmark b2

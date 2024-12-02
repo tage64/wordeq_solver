@@ -7,7 +7,7 @@ use zip::ZipArchive;
 
 use crate::*;
 
-type SolverResult = (Formula, Solution, NodeStats);
+pub type SolverResult = (Formula, Solution, NodeStats);
 
 pub fn run_benchmark(
   formulae: impl ExactSizeIterator<Item = (usize, Formula)>,
@@ -108,7 +108,7 @@ pub fn benchmark_n(n: u32) -> anyhow::Result<impl ExactSizeIterator<Item = Formu
     .map(|x| x.into_iter())
 }
 
-fn summerize_results(results: &[SolverResult]) {
+pub fn summerize_results(results: &[SolverResult]) {
   // All results which are not cancelled, that is SAT or UNSAT.
   let mut n_sat = 0;
   let mut completed_results = results
