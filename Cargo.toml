@@ -3,6 +3,8 @@ name = "smt_str_solver"
 version = "0.1.0"
 edition = "2021"
 default-run = "smt_str_solver"
+license = "MPL-2.0"
+license-file = "LICENSE.txt"
 
 [features]
 trace_logging = []
